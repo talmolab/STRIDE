@@ -126,7 +126,7 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
     # Detection: median(stride_length_cm) sign gives the forward convention per batch.
     sl_col = "stride_length_cm"
     filter_direction = sf.get("filter_forward_direction", True)
-    if filter_direction and sl_col in df.columns:
+    if filter_direction and sl_col in df.columns and len(df):
         n_before_dir = len(df)
         median_sl = df[sl_col].median()
         forward_sign = np.sign(median_sl)

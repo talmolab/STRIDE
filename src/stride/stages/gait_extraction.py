@@ -104,7 +104,30 @@ def connected_components1d(x, return_limits=False):
         return [np.arange(i0, i1, dtype=int) for i0, i1 in zip(starts, ends)]
 
 
-def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0):
+def resolve_roi_yml(stem: str, yml_dir=None, video_path=None):
+    """Locate a video's ROI yml, tolerating naming/layout variants.
+
+    Tries (in order) yml_dir then co-located next to the video, for these names:
+      {stem}.preds.v2.best1.yml  (STRIDE inference output)
+      {stem}.rois.yml            (per-day-subdir cohorts, ROIs co-located with videos)
+      {stem}.yml
+    Returns the first existing Path, or None.
+    """
+    names = [f"{stem}.preds.v2.best1.yml", f"{stem}.rois.yml", f"{stem}.yml"]
+    dirs = []
+    if yml_dir is not None:
+        dirs.append(Path(yml_dir))
+    if video_path is not None:
+        dirs.append(Path(video_path).parent)  # co-located fallback
+    for d in dirs:
+        for n in names:
+            p = d / n
+            if p.exists():
+                return p
+    return None
+
+
+def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0, video_path=None):
     """
     Calculate cm/px calibration from segment2 ROI polygon.
 
@@ -116,11 +139,9 @@ def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0):
     so we use min(horiz_px, vert_px) for calibration.
     """
     import yaml
-    yml_dir = Path(yml_dir)
-    # FIX: was `yml_path = YML_DIR / ...` (used global instead of parameter)
-    yml_path = yml_dir / f"{stem}.preds.v2.best1.yml"
-    if not yml_path.exists():
-        raise FileNotFoundError(f"ROI YAML not found: {yml_path}")
+    yml_path = resolve_roi_yml(stem, yml_dir, video_path)
+    if yml_path is None:
+        raise FileNotFoundError(f"ROI YAML not found for stem '{stem}' (yml_dir={yml_dir})")
     with open(yml_path, "r") as f:
         y = yaml.safe_load(f) or {}
     polys = {}
@@ -155,8 +176,9 @@ def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0):
     return float(maze_width_cm) / maze_width_px  # cm/px
 
 
-def px_per_cm_from_yaml(stem: str, yml_dir, maze_width_cm=10.0) -> float:
-    return 1.0 / estimate_cm_per_px_from_yaml(stem, yml_dir, maze_width_cm=maze_width_cm)
+def px_per_cm_from_yaml(stem: str, yml_dir, maze_width_cm=10.0, video_path=None) -> float:
+    return 1.0 / estimate_cm_per_px_from_yaml(stem, yml_dir, maze_width_cm=maze_width_cm,
+                                              video_path=video_path)
 
 
 def read_fps(video_obj, video_path: str | Path, yml_dir=None, stem: str | None = None) -> float | None:
@@ -438,14 +460,14 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
     video  = labels.videos[0]
     stem   = Path(video.filename).stem
 
-    yml_dir = Path(yml_dir)
-
-    # Pixel->cm and FPS
+    # Pixel->cm and FPS. Pass video_path so ROIs co-located with the video (.rois.yml in a
+    # per-day subdir) resolve even when a separate yml_dir isn't provided.
     try:
-        _px_per_cm = px_per_cm_from_yaml(stem, yml_dir, maze_width_cm=params["MAZE_WIDTH_CM"])
+        _px_per_cm = px_per_cm_from_yaml(stem, yml_dir, maze_width_cm=params["MAZE_WIDTH_CM"],
+                                         video_path=video_path)
     except Exception:
         _px_per_cm = 1.0
-    fps = read_fps(video, video.filename, yml_dir=yml_dir, stem=stem) or params["DEFAULT_FPS"]
+    fps = read_fps(video, video_path, yml_dir=yml_dir, stem=stem) or params["DEFAULT_FPS"]
 
     # Node indices
     def idx(name): return labels.skeleton.index(name)
@@ -706,7 +728,8 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
     video_dir = Path(video_dir)
     rows = []
 
-    videos = sorted(video_dir.glob("*.mp4"))
+    # recursive + case-insensitive: supports flat dirs AND nested per-day subdirs
+    videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
     for vp in videos:
         pose_path = vp.with_suffix(pose_slp_suffix)
         if not pose_path.exists():
@@ -726,8 +749,18 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
                     continue
                 for inst in lf.instances:
                     for node, pt in zip(labels.skeleton.nodes, inst.points):
-                        if hasattr(pt, 'score') and np.isfinite(pt.score):
-                            conf_sum[node.name] = conf_sum.get(node.name, 0.0) + pt.score
+                        # sleap_io >=0.7 stores points as a structured array (np.void with a
+                        # 'score' field, no .score attribute); older versions use objects with
+                        # pt.score. Support both so confidence isn't silently read as 0.
+                        if hasattr(pt, "score"):
+                            score = pt.score
+                        else:
+                            try:
+                                score = float(pt["score"])
+                            except (KeyError, ValueError, TypeError, IndexError):
+                                continue
+                        if np.isfinite(score):
+                            conf_sum[node.name] = conf_sum.get(node.name, 0.0) + score
                             conf_count[node.name] = conf_count.get(node.name, 0) + 1
 
             row = {"stem": vp.stem, "video_path": str(vp), "frames_total": T}
