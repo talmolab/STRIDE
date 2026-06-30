@@ -85,10 +85,11 @@ def run_decision_analysis(
     meta_df["reward"] = meta_df["reward"].astype(str).str.strip().str.upper().str[:1]
     meta_map = {(row.day, row.mouse): row.reward for _, row in meta_df.iterrows()}
 
-    # Find videos
-    videos = sorted(list(video_dir.glob("*.mp4")) + list(video_dir.glob("*.MP4")))
+    # Find videos — supports a flat dir OR nested per-day subdirs (DAY1/, DAY2/, ...)
+    videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
 
-    # Create worker function with bound arguments
+    # Create worker function with bound arguments. video_path is left as the single
+    # unbound positional so run_parallel can call worker_fn(video) directly.
     worker_fn = partial(
         process_single_video,
         yml_dir=yml_dir,
@@ -100,9 +101,11 @@ def run_decision_analysis(
     # Process videos in parallel (CPU-bound analysis)
     if n_workers > 1:
         print(f"Running decision analysis with {n_workers} parallel workers...")
+        # Pass the picklable partial directly. A lambda wrapper here cannot be pickled
+        # by ProcessPoolExecutor, which silently broke every n_workers>1 run.
         results = run_parallel(
             items=videos,
-            worker_fn=lambda v: worker_fn(video_path=v),
+            worker_fn=worker_fn,
             n_workers=n_workers,
             desc="Decision Analysis",
         )
@@ -180,11 +183,11 @@ def process_single_video(
 
     # Check for required files
     pose_path = video_path.with_suffix(".slp")
-    yml_path = yml_dir / f"{video_path.stem}.preds.v2.best1.yml"
+    yml_path = resolve_roi_yml(video_path, yml_dir)
 
     if not pose_path.exists():
         return {"status": "skip_pose", "video": video_path.name}
-    if not yml_path.exists():
+    if yml_path is None:
         return {"status": "skip_yml", "video": video_path.name}
 
     reward = meta_map.get((key["day"], key["mouse"]), "")
@@ -609,6 +612,29 @@ def parse_filename(video_path: Path) -> Optional[dict]:
         "mouse": int(m.group(2)),
         "trial": int(m.group(3)),
     }
+
+
+def resolve_roi_yml(video_path: Path, yml_dir: Optional[Path]) -> Optional[Path]:
+    """Locate a video's ROI yml, tolerating naming/layout variants.
+
+    Searches (in order) the yml_dir then co-located next to the video, for these names:
+      {stem}.preds.v2.best1.yml  (STRIDE inference output)
+      {stem}.rois.yml            (per-day-subdir cohorts, ROIs co-located with videos)
+      {stem}.yml
+    Returns the first existing path, or None. Pass yml_dir=None for co-located-only.
+    """
+    stem = video_path.stem
+    names = [f"{stem}.preds.v2.best1.yml", f"{stem}.rois.yml", f"{stem}.yml"]
+    search_dirs = []
+    if yml_dir is not None:
+        search_dirs.append(Path(yml_dir))
+    search_dirs.append(video_path.parent)  # co-located fallback
+    for d in search_dirs:
+        for n in names:
+            p = d / n
+            if p.exists():
+                return p
+    return None
 
 
 def load_rois(yml_path: Path) -> dict[str, Polygon]:
