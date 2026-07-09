@@ -154,25 +154,24 @@ def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0, video_p
     if seg is None:
         raise ValueError("segment2 polygon not found in YAML.")
     q = np.asarray(seg[:4], dtype=float)
-    ys = q[:, 1]
-    top2 = np.argsort(ys)[:2]
-    bot2 = np.argsort(ys)[-2:]
 
-    # Calculate horizontal distance (average of top and bottom edges)
-    w_top = float(np.linalg.norm(q[top2[0]] - q[top2[1]]))
-    w_bot = float(np.linalg.norm(q[bot2[0]] - q[bot2[1]]))
-    horiz_px = 0.5 * (w_top + w_bot)
-
-    # Calculate vertical distance (average of left and right edges)
-    h_left = float(np.linalg.norm(q[top2[0]] - q[bot2[0]]))
-    h_right = float(np.linalg.norm(q[top2[1]] - q[bot2[1]]))
-    vert_px = 0.5 * (h_left + h_right)
-
-    # FIX: Use the SMALLER dimension as maze corridor width (10 cm)
-    maze_width_px = min(horiz_px, vert_px)
+    # segment2 is a quad given as 4 CONSECUTIVE polygon vertices. Its two side lengths are the
+    # means of the two pairs of OPPOSITE edges; the maze corridor width (10 cm) is the shorter side.
+    #
+    # BUGFIX: the previous implementation grouped vertices into "top-2 / bottom-2" by y-coordinate
+    # and measured top/bottom/left/right spans. That silently assumes the rectangle is axis-aligned.
+    # When the corridor runs at an ANGLE (e.g. the DJI T-maze), the y-sort pairs the wrong vertices
+    # and returns a skew/diagonal span instead of the short edge — roughly DOUBLING maze_width_px and
+    # halving all cm distances/speeds. It was orientation-dependent, so it hit some clips and not
+    # others (e.g. 100% of one DJI cohort, ~40% of another). Using consecutive-edge lengths is
+    # rotation-invariant and reads the true corridor width regardless of maze orientation.
+    edges = [float(np.linalg.norm(q[i] - q[(i + 1) % 4])) for i in range(4)]
+    dim_a = 0.5 * (edges[0] + edges[2])   # one pair of opposite edges
+    dim_b = 0.5 * (edges[1] + edges[3])   # the other pair
+    maze_width_px = min(dim_a, dim_b)     # corridor width = the shorter side
 
     if not np.isfinite(maze_width_px) or maze_width_px <= 0:
-        raise ValueError(f"Invalid segment2 dimensions from YAML: horiz={horiz_px}, vert={vert_px}")
+        raise ValueError(f"Invalid segment2 dimensions from YAML: edges={edges}")
     return float(maze_width_cm) / maze_width_px  # cm/px
 
 
