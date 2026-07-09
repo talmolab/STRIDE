@@ -471,7 +471,13 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
         try:
             _px_per_cm = px_per_cm_from_yaml(stem, yml_dir, maze_width_cm=params["MAZE_WIDTH_CM"],
                                              video_path=video_path)
-        except Exception:
+        except Exception as e:
+            # DO NOT silently fall back to 1.0 (== cm==px, a ~26x error that looks plausible). Make it
+            # LOUD and out-of-range so the calibration safety gate FAILs on these rows instead of
+            # shipping garbage. (px/cm=1.0 -> outside [5,40] -> safety_checks flags it.)
+            print(f"  [WARN] px/cm derivation FAILED for {stem} ({type(e).__name__}: {e}); "
+                  f"writing sentinel px/cm=1.0 — this clip's cm metrics are INVALID and must be "
+                  f"caught by the calibration gate.", flush=True)
             _px_per_cm = 1.0
     fps = read_fps(video, video_path, yml_dir=yml_dir, stem=stem) or params["DEFAULT_FPS"]
 
