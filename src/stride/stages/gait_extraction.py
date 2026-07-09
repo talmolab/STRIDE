@@ -461,11 +461,18 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
 
     # Pixel->cm and FPS. Pass video_path so ROIs co-located with the video (.rois.yml in a
     # per-day subdir) resolve even when a separate yml_dir isn't provided.
-    try:
-        _px_per_cm = px_per_cm_from_yaml(stem, yml_dir, maze_width_cm=params["MAZE_WIDTH_CM"],
-                                         video_path=video_path)
-    except Exception:
-        _px_per_cm = 1.0
+    # PX_PER_CM_OVERRIDE (optional): a known, externally-verified px/cm (e.g. from a ChArUco
+    # calibration board) takes precedence over the per-video segment2 derivation. Use this when
+    # you have a trusted per-cohort calibration constant — it's immune to any ROI/segment2 issue.
+    override = params.get("PX_PER_CM_OVERRIDE") if isinstance(params, dict) else None
+    if override:
+        _px_per_cm = float(override)
+    else:
+        try:
+            _px_per_cm = px_per_cm_from_yaml(stem, yml_dir, maze_width_cm=params["MAZE_WIDTH_CM"],
+                                             video_path=video_path)
+        except Exception:
+            _px_per_cm = 1.0
     fps = read_fps(video, video_path, yml_dir=yml_dir, stem=stem) or params["DEFAULT_FPS"]
 
     # Node indices
