@@ -1,10 +1,10 @@
 # STRIDE
 
-**Stride-level Tracking to Reveal Impairment before Dementia Emerges**
+**Stride-level Tracking and Integrated Decision Extraction**
 
-STRIDE is an automated pipeline for dual cognitive and motor phenotyping of mice in T-maze behavioral assays using [SLEAP](https://sleap.ai) pose estimation. It extracts 27 behavioral metrics from standard bottom-up T-maze video — up from 4 with manual scoring — without specialized hardware.
+STRIDE is an automated pipeline for dual cognitive and motor phenotyping of mice performing the T-maze rewarded-alternation task, using [SLEAP](https://sleap.ai) pose estimation. From a single **bottom-up video** (camera mounted beneath a transparent maze floor), it extracts **30 behavioral metrics** — 11 T-maze cognitive, 16 stride-level gait, and 3 region-specific gait measures — versus the 4 obtainable by conventional manual scoring, and requires **no specialized gait hardware** (no treadmills, force plates, or pressure-sensitive walkways).
 
-The key finding driving this work: **motor gait deficits are detectable before cognitive decline becomes apparent**, making stride-level gait analysis a potential early biomarker for Alzheimer's disease progression in mouse models.
+The central finding: **stride-level gait deficits emerge in tau (hMAPT) mice before T-maze choice accuracy diverges from wild type**, suggesting gait as an early, model-specific behavioral marker of tauopathy. (In these cohorts, App^NL-F mice were behaviorally indistinguishable from wild type.)
 
 ---
 
@@ -15,7 +15,7 @@ Raw video (.mp4) + SLEAP models
     |
     v
 [1] Camera calibration & distortion check
-[2] SLEAP inference (15-keypoint pose + 7-region ROI segmentation)
+[2] SLEAP top-down inference — centroid + centered-instance (15-keypoint pose + 7-region ROI segmentation)
 [3] T-maze behavioral analysis (arm choice, snout probes, junction exploration)
 [4] Keypoint preprocessing (interpolation, smoothing, velocity)
 [5] Stride detection (swing phases, foot-strikes, stride segmentation)
@@ -36,7 +36,7 @@ Raw video (.mp4) + SLEAP models
 - Choice latency and stem traversal metrics
 
 ### Motor Phenotyping (Gait)
-- 14 stride-level gait metrics following [Sheppard et al. (2022)](https://doi.org/10.1016/j.celrep.2022.110231) and [Bellardita & Kiehn (2015)](https://doi.org/10.1016/j.cub.2015.04.005)
+- 16 stride-level gait metrics (14 enter the mixed-model analysis) following [Sheppard et al. (2022)](https://doi.org/10.1016/j.celrep.2022.110231) and [Bellardita & Kiehn (2015)](https://doi.org/10.1016/j.cub.2015.04.005)
 - Spatial: stride length, step length, step width
 - Temporal: stride duration, step frequency, limb duty factor, temporal symmetry
 - Body dynamics: lateral displacement of snout, tailbase, tailtip (normalized)
@@ -45,16 +45,16 @@ Raw video (.mp4) + SLEAP models
 
 ### Combined Analysis
 - Linear mixed models (M1: all effects, M2: speed-corrected direct effects)
-- FDR-corrected significance testing across 14 metrics
-- WT vs Tau logistic regression classifier combining cognitive + motor features
+- FDR-corrected significance testing across 14 gait metrics
+- All three genotypes (WT, App^NL-F, Tau) enter the mixed models; the classifier is a **binary WT-vs-Tau** logistic regression (cognitive + motor features), as App^NL-F mice were behaviorally indistinguishable from WT
 - Regional gait analysis (stem, junction, arm)
 
 ## Installation
 
 ```bash
 # Clone
-git clone https://github.com/LeoMeow123/stride.git
-cd stride
+git clone https://github.com/LeoMeow123/STRIDE.git
+cd STRIDE
 
 # Install (requires Python >= 3.12)
 pip install -e .
@@ -62,6 +62,11 @@ pip install -e .
 # Or with uv
 uv pip install -e .
 ```
+
+> **Inference runtime (stages 1–2).** SLEAP pose/ROI inference runs on a **separate GPU environment**
+> with the [sleap-nn](https://github.com/talmolab/sleap-nn) runtime (PyTorch + a CUDA GPU); install it
+> per its own instructions. The `pip install` above provides the STRIDE analysis package (stages 3–10).
+> `sleap-io` (a dependency here) handles `.slp` file I/O only — it is not an inference engine.
 
 ## Quick Start
 
@@ -148,8 +153,10 @@ stride/
       gait_filtering.py    # [6] Stride filtering
       gait_lmm.py          # [7-9] Trial tagging + LMM analysis
       classification.py    # [10] WT vs Tau logistic regression
+      run_inference.py     # [1-2] Config-driven inference runner (distortion + pose + ROI + yaml)
       run_tmaze.py         # Config-driven T-maze runner
       run_gait_extraction.py # Config-driven gait extraction runner
+      safety_checks.py     # Gate checks (calibration / ROI coverage / fps / body-length)
     utils/
       checkpoint.py        # Resume support for batch processing
       parallel.py          # Multi-GPU parallel processing
@@ -169,11 +176,35 @@ stride/
 | 9 | `heatmap_*.png` | Dual-panel heatmaps (-log10(p) + effect sizes) |
 | 10 | `regression_roc_curves.png` | ROC curves for T-maze, Gait, Combined |
 
+## Models
+
+STRIDE requires two trained SLEAP models that are **not bundled in this repository**:
+- **Pose** — 15-keypoint top-down model (centroid + centered-instance)
+- **ROI** — 7-region maze-segmentation model
+
+Point `pose_model_paths` and `roi_model_paths` in `config.yaml` at your local copies.
+
+<!-- TODO(before submission): deposit the trained pose + ROI models (with their sleap-nn training
+     version) to a citable archive (Zenodo/OSF/HuggingFace) and add the DOI + download steps here. -->
+> Trained model weights: *to be deposited (DOI to be added).*
+
+## Data Availability
+
+<!-- TODO(before submission): state where the T-maze videos + derived CSVs are deposited (repository +
+     DOI or access procedure), and add a small example clip + expected-output CSV + example config for
+     an end-to-end smoke test. -->
+> The raw T-maze videos and derived metric tables supporting this work are available at *(repository /
+> DOI to be added)*. An example clip and matching config for a smoke test will be provided with the release.
+
 ## Citation
 
 If you use STRIDE in your research, please cite:
 
 > Li, Y. et al. (2026). *Dual cognitive and motor phenotyping for early detection of AD progression in APP and Tau models.* (in preparation)
+
+<!-- TODO(before submission): cut a tagged release, archive it to Zenodo for a software DOI, bump the
+     pyproject/CITATION.cff version to match, and add a "Software: DOI:xxxxx (vX.Y.Z)" line here. -->
+For the software itself, see [`CITATION.cff`](CITATION.cff) *(software DOI to be added on release)*.
 
 ## License
 

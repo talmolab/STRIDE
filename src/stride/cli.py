@@ -2,14 +2,14 @@
 Command-line interface for the T-maze pipeline.
 
 Usage:
-    tmaze run --input /path/to/videos --output /path/to/results
-    tmaze check-distortion --input /path/to/videos
-    tmaze pose-inference --input /path/to/videos
-    tmaze roi-inference --input /path/to/videos
-    tmaze convert-roi --input /path/to/slp --output /path/to/yml
-    tmaze analyze-decisions --input /path/to/data --meta /path/to/meta.csv
-    tmaze analyze-gait --input /path/to/data
-    tmaze status
+    stride run --input /path/to/videos --output /path/to/results
+    stride check-distortion --input /path/to/videos
+    stride pose-inference --input /path/to/videos
+    stride roi-inference --input /path/to/videos
+    stride convert-roi --input /path/to/slp --output /path/to/yml
+    stride analyze-decisions --videos /path/to/videos --yml /path/to/roi_yml --meta /path/to/meta.csv
+    stride analyze-gait --input /path/to/data
+    stride status
 """
 
 import click
@@ -24,7 +24,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="tmaze-pipeline")
+@click.version_option(version=__version__, prog_name="stride")
 @click.pass_context
 def main(ctx):
     """T-maze Pipeline - Automated video analysis for behavioral experiments."""
