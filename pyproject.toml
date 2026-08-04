@@ -10,6 +10,7 @@ authors = [
 ]
 dependencies = [
     "click>=8.0",
+    "rich>=13.0",
     "numpy>=1.24",
     "opencv-python>=4.8",
     "pandas>=2.0",
@@ -25,11 +26,11 @@ dependencies = [
 ]
 
 [project.scripts]
-stride = "stride.cli:cli"
+stride = "stride.cli:main"
 
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]

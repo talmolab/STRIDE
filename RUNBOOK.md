@@ -1,5 +1,13 @@
 # STRIDE / T-maze pipeline — RUNBOOK (run steps in order; do not self-select)
 
+> **⚠ Internal operations SOP — not part of the public STRIDE API.** This runbook is the lab's
+> internal per-day operating procedure. It references internal cohorts, front-end scripts
+> (`rename/`, `roi_inference/launch-*.sh`, `pose_inference/launch-pose.sh`,
+> `analysis/run_stride_<cohort>_*.py`) that live in the analysis project and are **not shipped in this
+> package**, and an internal `DATA_QUALITY_FLAGS.md`. It is kept for provenance. New users should
+> follow `README.md`, not this file.
+
+
 **Purpose.** A deterministic, gated procedure for taking one recording day from raw video to gait.
 It exists because steps were being reordered/skipped by judgement and a silent calibration bug reached
 the figures. **Follow the steps in order. Each step has a GATE that must pass before the next step, and

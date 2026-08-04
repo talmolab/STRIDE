@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use STRIDE, please cite the software and the associated manuscript."
+title: "STRIDE: Stride-level Tracking and Integrated Decision Extraction"
+abstract: >-
+  An automated pipeline for dual cognitive and motor phenotyping of mice in the T-maze
+  rewarded-alternation task from bottom-up video, using SLEAP pose estimation.
+type: software
+authors:
+  - family-names: Li
+    given-names: Yipeng
+    # TODO(before submission): confirm corresponding email + affiliation (ORCID if available).
+license: MIT
+version: "0.1.0"
+repository-code: "https://github.com/LeoMeow123/STRIDE"
+# TODO(before submission): add `doi:` (Zenodo software DOI) and cut a matching release tag,
+# then bump `version` above and pyproject.toml to that tag.
