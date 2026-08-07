@@ -175,6 +175,34 @@ stride/
 | 9 | `lmm_results_all.csv` | M1/M2 LMM coefficients, p-values, FDR |
 | 9 | `heatmap_*.png` | Dual-panel heatmaps (-log10(p) + effect sizes) |
 | 10 | `regression_roc_curves.png` | ROC curves for T-maze, Gait, Combined |
+| all | `<stage>_run_manifest.yaml` | **Provenance sidecar** — see below |
+
+### Run manifest (provenance)
+
+Every pipeline stage writes a `<stage>_run_manifest.yaml` next to its outputs recording **how** they
+were produced, so a run stays reproducible and auditable long after the fact:
+
+- `timestamp_utc`, `stride_version`, and the exact **git** commit/branch (plus a `dirty` flag)
+- the **models** used (paths + size/mtime fingerprint)
+- the **parameters** and the **inputs**/**outputs** (with CSV row counts)
+- the **environment** — Python + key package versions (`sleap-nn`, `sleap-io`, `numpy`, …), host, command
+
+```yaml
+stage: decisions
+timestamp_utc: '2026-08-07T17:06:46+00:00'
+stride_version: 0.1.0
+git: {commit_short: 46074bc85314, branch: main, dirty: false}
+models: [{path: .../finetune_final_v5/centroid/best.ckpt, size_bytes: 1507696075}]
+environment: {python: 3.13.12, packages: {sleap-nn: 0.2.0, ...}}
+results: {ok: 1330, total: 1476}
+```
+
+Programmatic (non-CLI) callers can emit one too:
+
+```python
+from stride.run_manifest import write_run_manifest
+write_run_manifest(output_dir, stage="gait", models=[...], params={...}, outputs=[...])
+```
 
 ## Models
 
