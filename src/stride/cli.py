@@ -19,6 +19,7 @@ from rich.table import Table
 
 from stride import __version__
 from stride.config import PipelineConfig
+from stride.run_manifest import write_run_manifest
 
 console = Console()
 
@@ -143,8 +144,27 @@ def run(ctx, input_dir, output_dir, meta_csv, n_workers, skip_distortion, skip_p
     else:
         console.print("\n[bold yellow]Stage 6: Skipped decision analysis (no metadata CSV)[/]")
 
+    # Provenance sidecar: record how this run was produced (code, models, params, env).
+    try:
+        from stride.stages.pose_inference import DEFAULT_POSE_MODELS
+        from stride.stages.roi_inference import DEFAULT_ROI_MODELS
+        _models = [*DEFAULT_POSE_MODELS, *DEFAULT_ROI_MODELS]
+    except Exception:
+        _models = None
+    manifest_path = write_run_manifest(
+        config.output_dir, "pipeline",
+        models=_models,
+        params={"n_workers": n_workers, "batch_size": batch_size, "device": device,
+                "skip_distortion": skip_distortion, "skip_pose": skip_pose, "skip_roi": skip_roi},
+        inputs={"video_dir": config.video_dir, "meta_csv": config.meta_csv, "n_videos": len(videos)},
+        outputs=[config.output_dir / "decisions" / "decisions.csv",
+                 config.output_dir / "distortion_check.csv"],
+    )
+
     console.print("\n[bold green]Pipeline complete![/]")
     console.print(f"Results saved to: {config.output_dir}")
+    if manifest_path:
+        console.print(f"Run manifest: {manifest_path}")
 
 
 @main.command("pose-inference")
@@ -207,6 +227,19 @@ def pose_inference(ctx, input_dir, output_dir, model_paths, batch_size, device, 
     console.print(f"Skipped: {results['skipped']}")
     if results['failed'] > 0:
         console.print(f"[red]Failed: {results['failed']} videos[/]")
+
+    # Provenance sidecar (worker 0 only, to avoid multi-GPU write races).
+    if worker_id == 0:
+        from stride.stages.pose_inference import DEFAULT_POSE_MODELS
+        _models = model_paths or [str(p) for p in DEFAULT_POSE_MODELS]
+        mpath = write_run_manifest(
+            Path(output_dir) if output_dir else Path(input_dir), "pose_inference",
+            models=_models,
+            params={"batch_size": batch_size, "device": device, "num_workers": num_workers, "overwrite": overwrite},
+            inputs={"video_dir": input_dir}, results=results,
+        )
+        if mpath:
+            console.print(f"Run manifest: {mpath}")
 
 
 @main.command("check-distortion")
@@ -312,6 +345,19 @@ def roi_inference(ctx, input_dir, output_dir, model_paths, device, gpu, worker_i
     if results['failed'] > 0:
         console.print(f"[red]Failed: {results['failed']} videos[/]")
 
+    # Provenance sidecar (worker 0 only, to avoid multi-GPU write races).
+    if worker_id == 0:
+        from stride.stages.roi_inference import DEFAULT_ROI_MODELS
+        _models = model_paths or [str(p) for p in DEFAULT_ROI_MODELS]
+        mpath = write_run_manifest(
+            Path(output_dir), "roi_inference",
+            models=_models,
+            params={"device": device, "num_workers": num_workers, "overwrite": overwrite},
+            inputs={"video_dir": input_dir}, results=results,
+        )
+        if mpath:
+            console.print(f"Run manifest: {mpath}")
+
 
 @main.command("convert-roi")
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
@@ -339,6 +385,13 @@ def convert_roi(ctx, input_dir, output_dir, overwrite):
         console.print(f"[yellow]Missing keypoints: {results['missing_keypoints']}[/]")
     if results['failed'] > 0:
         console.print(f"[red]Failed: {results['failed']}[/]")
+
+    mpath = write_run_manifest(
+        Path(output_dir), "roi_to_yaml",
+        inputs={"slp_dir": input_dir}, results=results,
+    )
+    if mpath:
+        console.print(f"Run manifest: {mpath}")
 
 
 @main.command("analyze-decisions")
@@ -373,6 +426,15 @@ def analyze_decisions(ctx, video_dir, yml_dir, meta_csv, output_csv, n_workers):
     console.print(f"[green]Analyzed: {results['ok']}/{results['total']} trials[/]")
     console.print(f"Output saved to: {output_csv}")
 
+    mpath = write_run_manifest(
+        Path(output_csv).parent, "decisions",
+        params={"n_workers": n_workers},
+        inputs={"video_dir": video_dir, "yml_dir": yml_dir, "meta_csv": meta_csv},
+        outputs=[output_csv], results=results,
+    )
+    if mpath:
+        console.print(f"Run manifest: {mpath}")
+
 
 @main.command("analyze-gait")
 @click.option("--input", "-i", "input_csv", type=click.Path(exists=True), required=True,
@@ -402,6 +464,15 @@ def analyze_gait(ctx, input_csv, conf_csv, output_csv, threshold):
     console.print(f"[green]Original: {results['original']} strides[/]")
     console.print(f"[green]After filtering: {results['filtered']} strides[/]")
     console.print(f"Output saved to: {output_csv}")
+
+    mpath = write_run_manifest(
+        Path(output_csv).parent, "gait_filtering",
+        params={"confidence_threshold": threshold},
+        inputs={"input_csv": input_csv, "confidence_csv": conf_csv},
+        outputs=[output_csv], results=results,
+    )
+    if mpath:
+        console.print(f"Run manifest: {mpath}")
 
 
 @main.command("count-frames")
