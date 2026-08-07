@@ -81,7 +81,7 @@ def run_decision_analysis(
     # Load metadata
     meta_df = pd.read_csv(meta_csv)
     meta_df["day"] = meta_df["day"].astype(str).str.strip().str.upper()
-    meta_df["mouse"] = meta_df["mouse"].astype(int)
+    meta_df["mouse"] = meta_df["mouse"].astype(str).str.strip()  # keep string: numeric AND GENO_cage_mouse IDs
     meta_df["reward"] = meta_df["reward"].astype(str).str.strip().str.upper().str[:1]
     meta_map = {(row.day, row.mouse): row.reward for _, row in meta_df.iterrows()}
 
@@ -602,14 +602,17 @@ def build_metrics(events_df, decisions_df):
 # ============================================================
 
 def parse_filename(video_path: Path) -> Optional[dict]:
-    """Extract day, mouse, trial from filename like Day12_13982_Trial8.mp4"""
-    pattern = re.compile(r"(?i)^day(\d+)_([0-9]+)_trial(\d+)\.mp4$")
+    """Extract day, mouse, trial from filename like Day12_13982_Trial8.mp4 or Day1_WT_3_1_Trial8.mp4.
+
+    Mouse token is kept as a string so genotype-prefixed IDs (e.g. WT_3_1, M4-1) work as well as
+    purely numeric IDs; the meta side is normalized to str to match (see run_decision_analysis)."""
+    pattern = re.compile(r"(?i)^day(\d+)_(.+?)_trial(\d+)\.mp4$")
     m = pattern.match(video_path.name)
     if not m:
         return None
     return {
         "day": f"DAY{int(m.group(1))}",
-        "mouse": int(m.group(2)),
+        "mouse": m.group(2).strip(),
         "trial": int(m.group(3)),
     }
 
