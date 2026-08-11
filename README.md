@@ -197,6 +197,10 @@ environment: {python: 3.13.12, packages: {sleap-nn: 0.2.0, ...}}
 results: {ok: 1330, total: 1476}
 ```
 
+A complete, annotated example (every field, one per line) is checked in at
+[`docs/example_run_manifest.yaml`](docs/example_run_manifest.yaml) — real manifests are
+generated at runtime next to each stage's outputs and are not committed.
+
 Programmatic (non-CLI) callers can emit one too:
 
 ```python
