@@ -1,0 +1,75 @@
+# Example run manifest (provenance sidecar).
+#
+# STRIDE writes one `<stage>_run_manifest.yaml` next to each stage's outputs, recording
+# *how* those outputs were produced. This file is a representative, sanitized example so
+# you can see the shape without running the pipeline — real manifests are generated at
+# runtime and are NOT committed to the repo. See README -> "Run manifest (provenance)".
+#
+# Every field is best-effort: if a manifest cannot be assembled the pipeline still
+# succeeds and a warning is printed to stderr (provenance never breaks a completed run).
+
+manifest_schema_version: 1
+stage: decisions                       # which pipeline stage wrote this
+timestamp_utc: '2026-08-07T17:06:46+00:00'
+stride_version: 0.1.0
+
+git:                                   # exactly which code produced the outputs
+  available: true
+  commit: 46074bc85314f0a2b1c9d7e3a8f45602cba1d9ee
+  commit_short: 46074bc85314
+  branch: main
+  describe: v0.1.0-3-g46074bc
+  remote: https://github.com/talmolab/STRIDE.git
+  last_commit_date: '2026-08-07T09:41:12-07:00'
+  dirty: false                         # were there uncommitted edits at run time?
+
+environment:                           # so the run can be reproduced
+  python: '3.13.12'
+  platform: Linux-6.8.0-x86_64-with-glibc2.39
+  hostname: gpu-workstation
+  user: researcher
+  packages:
+    stride: 0.1.0
+    sleap-io: 0.7.1
+    sleap-nn: 0.2.0
+    numpy: 2.4.6
+    pandas: 3.0.3
+    scipy: 1.17.1
+    torch: 2.12.0
+    opencv-python: 4.13.0.92
+    pyyaml: 6.0.3
+    click: 8.4.1
+
+command: stride analyze-decisions --config config.yaml
+
+models:                                # path + size/mtime fingerprint of each model
+- path: /data/models/finetune_final_v5/centroid/best.ckpt
+  exists: true
+  size_bytes: 1507696075
+  modified_utc: '2026-07-02T18:22:10+00:00'
+- path: /data/models/finetune_final_v5/centered_instance/best.ckpt
+  exists: true
+  size_bytes: 1489233008
+  modified_utc: '2026-07-02T18:24:51+00:00'
+
+params:                                # the stage's settings
+  min_trial_frames: 30
+  reward_arm: alternation
+  smoothing_window: 5
+
+inputs:                                # what went in
+  video_dir: /data/tmaze/cohort_18mo/videos
+  n_videos: 348
+
+outputs:                               # what came out (CSV row counts included)
+- path: /data/tmaze/cohort_18mo/decisions.csv
+  exists: true
+  size_bytes: 84213
+  modified_utc: '2026-08-07T17:06:46+00:00'
+  rows: 1476                           # data rows (header excluded)
+
+results:                               # stage-specific summary
+  ok: 1330
+  total: 1476
+
+extra: null                            # optional catch-all for stage-specific notes
