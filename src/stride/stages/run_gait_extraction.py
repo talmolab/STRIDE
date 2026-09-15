@@ -178,6 +178,11 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
     # Build params
     params = build_params(config)
     params["DEFAULT_FPS"] = batch_cfg.get("fps", params["DEFAULT_FPS"])
+    # Batch-level calibration override: a ChArUco-verified px/cm constant takes
+    # precedence over per-video segment2 derivation (see gait_extraction.py).
+    # Config-driven parity with the internal drivers used for the DJI cohorts.
+    if batch_cfg.get("px_per_cm_override"):
+        params["PX_PER_CM_OVERRIDE"] = float(batch_cfg["px_per_cm_override"])
 
     pose_slp_suffix = batch_cfg.get("pose_slp_suffix", ".slp")
     column_map = batch_cfg.get("column_map", {"mouse_id": ["mouse"], "sex": "Gender"})

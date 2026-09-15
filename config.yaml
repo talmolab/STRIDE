@@ -6,6 +6,10 @@
 #
 # To add a new batch: add a new entry under `batches:` with the required fields.
 # No code changes needed — run_analysis.py reads this file.
+#
+# Optional batch field `px_per_cm_override`: a trusted, externally-verified px/cm
+# (e.g. ChArUco board) that bypasses the per-video ROI-segment2 derivation in the
+# gait stage. Use for cohorts with a pinned calibration constant.
 # ============================================================================
 
 # --- Batch definitions ------------------------------------------------------
@@ -19,7 +23,7 @@ batches:
     mouse_id_cols: ["G", "number"]       # columns to concatenate for MouseID
     mouse_id_sep: "_"                    # separator when joining columns
     fps: 100
-    px_per_cm: 10.45
+    px_per_cm: 10.45                     # reference; extraction derives per-video unless px_per_cm_override is set
     has_sex: true                        # include Sex as covariate in LMM
     n_mice: 30
     finalized: true                      # skip inference stages; data already generated
