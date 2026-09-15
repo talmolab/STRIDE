@@ -14,9 +14,9 @@ Stages:
 
 Each stage checks for output file existence before running (resumable).
 
-Usage:
-    uv run python automated_pipeline/run_all.py
-    uv run python automated_pipeline/run_all.py --batch gopro_sept2025
+Usage (from the repo root):
+    python run_all.py                      # uses ./config.yaml, writes ./output/
+    python run_all.py --batch gopro_sept2025
     python run_all.py --stages 7-9         # only LMM
     python run_all.py --stages 3,7-9       # skip inference, run decisions + LMM
     python run_all.py --stages 1-2,3,4-6   # full from scratch through filtering
@@ -70,12 +70,19 @@ def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
         print(f"  ERROR: Script not found: {script}")
         return False
 
-    cmd = [sys.executable, str(script), "--config", config, "--output", output]
+    # Resolve to absolute paths so stage subprocesses are CWD-independent.
+    # (A relative --config previously broke: stages ran with cwd set to the
+    # PARENT of the repo — a relic of the pre-package `automated_pipeline/`
+    # layout — so `config.yaml` raised FileNotFoundError even when the user
+    # ran from the repo root, exactly as the README instructs.)
+    cmd = [sys.executable, str(script),
+           "--config", str(Path(config).resolve()),
+           "--output", str(Path(output).resolve())]
     if batch and stage_key != "10":  # regression doesn't take --batch
         cmd.extend(["--batch", batch])
 
     t0 = time.time()
-    result = subprocess.run(cmd, cwd=str(PIPELINE_DIR.parent))
+    result = subprocess.run(cmd)  # inherit the caller's CWD
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -88,8 +95,10 @@ def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
 
 def main():
     parser = argparse.ArgumentParser(description="T-Maze Pipeline Orchestrator")
-    parser.add_argument("--config", default="automated_pipeline/config.yaml")
-    parser.add_argument("--output", default="automated_pipeline/output")
+    parser.add_argument("--config", default=str(PIPELINE_DIR / "config.yaml"),
+                        help="Pipeline config (default: config.yaml next to this script)")
+    parser.add_argument("--output", default="output",
+                        help="Output directory (default: ./output, resolved from CWD)")
     parser.add_argument("--batch", default=None, help="Process only this batch key")
     parser.add_argument("--stages", default=None,
                         help="Comma-separated stage ranges to run (e.g., '1-3,7-9'). Default: all")
