@@ -77,7 +77,7 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
             print(f"\n  Stage 2a: No pose_model_paths in config. Skipping pose inference.")
         else:
             # Check if .slp files already exist for most videos
-            videos = sorted(video_dir.glob("*.mp4"))
+            videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
             pose_suffix = batch_cfg.get("pose_slp_suffix", ".slp")
             existing = sum(1 for v in videos if v.with_suffix(pose_suffix).exists())
 
@@ -106,7 +106,7 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
             roi_slp_dir = output_dir / batch_key / "roi_slp"
             roi_slp_dir.mkdir(parents=True, exist_ok=True)
 
-            videos = sorted(video_dir.glob("*.mp4"))
+            videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
             existing_roi = sum(1 for v in videos
                              if (roi_slp_dir / f"{v.stem}.preds.v2.best1.slp").exists())
 
