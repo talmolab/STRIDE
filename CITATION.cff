@@ -11,6 +11,6 @@ authors:
     # TODO(before submission): confirm corresponding email + affiliation (ORCID if available).
 license: MIT
 version: "0.1.0"
-repository-code: "https://github.com/LeoMeow123/STRIDE"
+repository-code: "https://github.com/talmolab/STRIDE"
 # TODO(before submission): add `doi:` (Zenodo software DOI) and cut a matching release tag,
 # then bump `version` above and pyproject.toml to that tag.
