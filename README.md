@@ -53,7 +53,7 @@ Raw video (.mp4) + SLEAP models
 
 ```bash
 # Clone
-git clone https://github.com/LeoMeow123/STRIDE.git
+git clone https://github.com/talmolab/STRIDE.git
 cd STRIDE
 
 # Install (requires Python >= 3.12)
