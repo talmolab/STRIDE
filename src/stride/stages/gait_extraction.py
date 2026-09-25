@@ -457,7 +457,10 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
 
     labels = sio.load_file(str(pose_path))
     video  = labels.videos[0]
-    stem   = Path(video.filename).stem
+    # stem MUST come from the on-disk video path, not video.filename: the .slp embeds
+    # the video name from inference time, which goes stale if videos are renamed after
+    # pose (stems then mismatch the confidence table and decisions outputs).
+    stem   = video_path.stem
 
     # Pixel->cm and FPS. Pass video_path so ROIs co-located with the video (.rois.yml in a
     # per-day subdir) resolve even when a separate yml_dir isn't provided.

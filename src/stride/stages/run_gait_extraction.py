@@ -94,7 +94,21 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
             # Merge confidence into strides by stem
             if "stem" in df.columns and "stem" in df_conf.columns:
                 df = df.merge(df_conf[["stem", "mean_confidence"]], on="stem", how="left")
-                n_low = (df["mean_confidence"] <= conf_threshold).sum()
+                # Guard against a silent stem mismatch: unmatched rows get NaN confidence,
+                # and NaN > threshold is False, so they would vanish without being counted.
+                n_unmatched = int(df["mean_confidence"].isna().sum())
+                if len(df) and n_unmatched == len(df):
+                    raise RuntimeError(
+                        "confidence merge matched 0 stems — stride stems and confidence stems "
+                        f"disagree (e.g. stride {df['stem'].iloc[0]!r} vs confidence "
+                        f"{df_conf['stem'].iloc[0] if len(df_conf) else '<empty>'!r}). "
+                        "This happens when pose .slp files embed a different video name than "
+                        "the file on disk (e.g. videos renamed after inference)."
+                    )
+                if n_unmatched:
+                    print(f"    WARNING: {n_unmatched:,} strides have no confidence entry "
+                          f"(stem mismatch); they are removed by this filter")
+                n_low = int((~(df["mean_confidence"] > conf_threshold)).sum())
                 df = df[df["mean_confidence"] > conf_threshold].copy()
                 print(f"    Confidence filter (>{conf_threshold}): removed {n_low:,} strides")
                 df.drop(columns=["mean_confidence"], inplace=True, errors="ignore")
