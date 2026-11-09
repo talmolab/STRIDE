@@ -151,17 +151,55 @@ def _file_summary(path: Any) -> dict:
     return info
 
 
+# Files inside a SLEAP model folder that identify the trained model.
+_MODEL_FILE_PATTERNS = ("*.ckpt", "*.pth", "*.pt", "*.h5", "*.keras", "*.onnx",
+                        "training_config.*", "initial_config.*", "*.yaml", "*.yml", "*.json")
+_MAX_MODEL_FILES = 12
+
+
 def _model_summary(path: Any) -> dict:
-    """Path + fingerprint (size, mtime) for one model file/dir — a cheap version stamp."""
+    """Path + fingerprint (size, mtime) for one model file/dir — a cheap version stamp.
+
+    For a model *folder* (the usual SLEAP layout) the fingerprint is taken from the files
+    inside it — the checkpoint(s) and training config — not from the folder entry itself,
+    whose size (typically 4096 bytes) says nothing about the model: ``size_bytes`` is the
+    total size of those files, ``modified_utc`` the newest of them, and ``files`` lists each
+    one with its own size and modification time.
+    """
     p = Path(path)
     info: dict = {"path": str(p), "exists": _safe_exists(p)}
     if info["exists"]:
         try:
-            st = p.stat()
-            info["size_bytes"] = st.st_size
-            info["modified_utc"] = datetime.fromtimestamp(
-                st.st_mtime, timezone.utc
-            ).isoformat(timespec="seconds")
+            if p.is_dir():
+                import fnmatch
+                files = []
+                for n_seen, f in enumerate(sorted(p.rglob("*"))):      # one walk of the folder
+                    if n_seen > 5000:
+                        break
+                    if any(fnmatch.fnmatch(f.name, pat) for pat in _MODEL_FILE_PATTERNS) and f.is_file():
+                        fst = f.stat()
+                        files.append({"name": str(f.relative_to(p)), "size_bytes": fst.st_size,
+                                      "_mtime": fst.st_mtime})
+                info["kind"] = "directory"
+                info["size_bytes"] = int(sum(f["size_bytes"] for f in files))
+                if files:
+                    info["modified_utc"] = datetime.fromtimestamp(
+                        max(f["_mtime"] for f in files), timezone.utc
+                    ).isoformat(timespec="seconds")
+                # checkpoints first (largest first), then configs; cap the list
+                files.sort(key=lambda f: (-f["size_bytes"], f["name"]))
+                info["n_files"] = len(files)
+                info["files"] = [
+                    {"name": f["name"], "size_bytes": f["size_bytes"],
+                     "modified_utc": datetime.fromtimestamp(f["_mtime"], timezone.utc).isoformat(timespec="seconds")}
+                    for f in files[:_MAX_MODEL_FILES]
+                ]
+            else:
+                st = p.stat()
+                info["size_bytes"] = st.st_size
+                info["modified_utc"] = datetime.fromtimestamp(
+                    st.st_mtime, timezone.utc
+                ).isoformat(timespec="seconds")
         except OSError:
             pass
     return info

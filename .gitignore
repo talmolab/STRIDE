@@ -11,3 +11,6 @@ scratch/
 *.parquet
 *.slp
 *.mp4
+
+# output of the README quick start on the mock data
+mock_output/

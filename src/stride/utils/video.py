@@ -122,10 +122,9 @@ def count_total_frames(
     n_videos = 0
     zeros = []
 
-    # Find all video files
-    video_files = []
-    for ext in extensions:
-        video_files.extend(video_dir.glob(f"*{ext}"))
+    # Find all video files (recursive, case-insensitive: per-day subfolders, .mp4 / .MP4)
+    from stride.utils.parallel import find_videos
+    video_files = find_videos(Path(video_dir), extensions=extensions)
 
     for video_path in sorted(video_files):
         n = get_frame_count(video_path)

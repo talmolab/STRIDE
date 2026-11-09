@@ -85,23 +85,33 @@ def find_videos(
     video_dir: Path,
     extensions: tuple[str, ...] = (".mp4", ".avi"),
     pattern: Optional[str] = None,
+    recursive: bool = True,
 ) -> list[Path]:
     """
-    Find video files in a directory.
+    Find video files under a directory.
+
+    The search is recursive (per-day subfolders are found) and the extension match is
+    case-insensitive (``.mp4`` and ``.MP4`` are both found). macOS resource-fork files
+    (``._name.mp4``) are ignored. A single video file may be passed instead of a directory.
 
     Args:
-        video_dir: Directory to search
-        extensions: Video file extensions
-        pattern: Optional glob pattern (e.g., "Day*_*.mp4")
+        video_dir: Directory to search (or one video file)
+        extensions: Video file extensions, lower case
+        pattern: Optional glob pattern (e.g., "Day*_*.mp4"); matched as given, in every subfolder
+        recursive: Search subfolders too (default)
 
     Returns:
         Sorted list of video paths
     """
+    video_dir = Path(video_dir)
+    if video_dir.is_file():
+        return [video_dir]
+
     if pattern:
-        return sorted(video_dir.glob(pattern))
+        found = video_dir.rglob(pattern) if recursive else video_dir.glob(pattern)
+        return sorted({p for p in found if not p.name.startswith("._")})
 
-    videos = []
-    for ext in extensions:
-        videos.extend(video_dir.glob(f"*{ext}"))
-
-    return sorted(set(videos))
+    exts = {e.lower() for e in extensions}
+    found = video_dir.rglob("*") if recursive else video_dir.glob("*")
+    return sorted({p for p in found
+                   if p.suffix.lower() in exts and not p.name.startswith("._")})

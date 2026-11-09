@@ -455,7 +455,10 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
     if not pose_path.exists():
         return None
 
-    labels = sio.load_file(str(pose_path))
+    # Falls back to the on-disk video when the .slp embeds an unreadable video path; files that
+    # load normally go through sio.load_file exactly as before.
+    from stride.utils.pose_io import load_pose_labels
+    labels = load_pose_labels(pose_path, video_path)
     video  = labels.videos[0]
     # stem MUST come from the on-disk video path, not video.filename: the .slp embeds
     # the video name from inference time, which goes stale if videos are renamed after
@@ -745,12 +748,16 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
 
     # recursive + case-insensitive: supports flat dirs AND nested per-day subdirs
     videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
+    n_no_pose = 0
+    unreadable = []
+    from stride.utils.pose_io import load_pose_labels
     for vp in videos:
         pose_path = vp.with_suffix(pose_slp_suffix)
         if not pose_path.exists():
+            n_no_pose += 1
             continue
         try:
-            labels = sio.load_file(str(pose_path))
+            labels = load_pose_labels(pose_path, vp)
             video = labels.videos[0]
             T = len(video)
             node_names = labels.skeleton.node_names
@@ -784,12 +791,24 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
                 n = conf_count.get(kp, 0)
                 row[f"avg_{kp}"] = conf_sum.get(kp, 0.0) / n if n > 0 else 0.0
             rows.append(row)
-        except Exception:
+        except Exception as exc:
+            unreadable.append(f"{vp.name}: {type(exc).__name__}: {exc}")
             continue
 
     df = pd.DataFrame(rows)
     df.to_csv(output_path, index=False)
     print(f"    Confidence CSV: {len(df)} videos → {output_path.name}")
+    if n_no_pose:
+        print(f"    ({n_no_pose} of {len(videos)} videos have no pose file "
+              f"<video name>{pose_slp_suffix}: no confidence row)")
+    if unreadable:
+        print(f"    WARNING: {len(unreadable)} pose file(s) could not be read for the confidence "
+              f"table; strides of these videos get no confidence value and are removed by the "
+              f"confidence filter:")
+        for u in unreadable[:5]:
+            print(f"      {u}")
+        if len(unreadable) > 5:
+            print(f"      ... and {len(unreadable) - 5} more")
     return output_path
 
 
@@ -802,11 +821,25 @@ def _process_wrapper(args):
     meta_row, params, yml_dir, pose_slp_suffix, column_map = args
     try:
         res = process_one_video(meta_row, params, yml_dir, pose_slp_suffix, column_map)
-        return {"status": "ok" if res else "skip", "result": res,
-                "video": meta_row.get("video_path", "?")}
+        out = {"status": "ok" if res else "skip", "result": res,
+               "video": meta_row.get("video_path", "?")}
     except Exception as e:
-        return {"status": "error", "error": str(e),
+        return {"status": "error", "error": f"{type(e).__name__}: {e}",
                 "video": meta_row.get("video_path", "?")}
+    # Reporting only (never affects the result): why a video was skipped, and which way the
+    # maze stem points in the image according to its ROI file.
+    try:
+        vp = Path(str(meta_row.get("video_path", "")))
+        if res is None:
+            out["reason"] = ("video file not found" if not vp.exists()
+                             else f"no pose file ({vp.with_suffix(pose_slp_suffix).name})")
+        else:
+            from stride.utils.roi import roi_stem_angle_deg
+            yml = resolve_roi_yml(vp.stem, yml_dir, vp)
+            out["roi_stem_angle_deg"] = roi_stem_angle_deg(yml) if yml is not None else None
+    except Exception:
+        pass
+    return out
 
 
 def run_gait_extraction(
@@ -855,6 +888,8 @@ def run_gait_extraction(
     all_per_video_rows = []
     errors = []
     n_ok = n_skip = 0
+    skip_reasons: dict = {}
+    stem_angles: dict = {}
 
     # Build args for each video
     args_list = [
@@ -872,8 +907,13 @@ def run_gait_extraction(
                 all_step_rows.extend(step_rows)
                 all_per_video_rows.append(per_video_row)
                 n_ok += 1
+                if res.get("roi_stem_angle_deg") is not None:
+                    stem_angles[Path(str(res["video"])).name] = res["roi_stem_angle_deg"]
             elif res["status"] == "skip":
                 n_skip += 1
+                why = res.get("reason", "video or pose file not found")
+                why = "no pose file" if why.startswith("no pose file") else why
+                skip_reasons[why] = skip_reasons.get(why, 0) + 1
             else:
                 errors.append(f"{Path(res['video']).name}: {res['error']}")
 
@@ -900,10 +940,121 @@ def run_gait_extraction(
 
     print(f"  Output: {out_stride.name} ({len(all_stride_rows):,} strides)")
 
-    return {
+    summary = {
         "ok": n_ok, "skipped": n_skip, "errors": len(errors),
         "total_strides": len(all_stride_rows),
         "stride_csv": str(out_stride),
         "step_csv": str(out_step),
         "video_csv": str(out_video),
     }
+
+    # End-of-stage report (messages only; nothing above is changed by it)
+    warnings_out = _report_gait_run(meta_rows, summary, skip_reasons, errors, all_stride_rows,
+                                    stem_angles, params, yml_dir, pose_slp_suffix)
+
+    # Provenance sidecar (best-effort; never breaks a completed run)
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            output_dir, "gait",
+            params=params,
+            inputs={"meta_csv": meta_csv, "yml_dir": yml_dir, "pose_slp_suffix": pose_slp_suffix,
+                    "column_map": column_map, "n_videos": len(meta_rows), "n_workers": n_workers},
+            outputs=[out_stride, out_step, out_video],
+            results={"ok": n_ok, "skipped": n_skip, "errors": len(errors),
+                     "total_strides": len(all_stride_rows),
+                     "skip_reasons": skip_reasons or None,
+                     "error_examples": errors[:20] or None,
+                     "warnings": warnings_out or None},
+        )
+    except Exception:
+        pass
+
+    return summary
+
+
+# Rig thresholds used for WARNINGS only (see the rig requirements in the documentation):
+# gait needs >= 100 fps and >= 20 px/cm; the stem is expected left-to-right in the image.
+_GAIT_MIN_FPS = 100.0
+_GAIT_MIN_PX_PER_CM = 20.0
+_STEM_ANGLE_TOL_DEG = 10.0
+
+
+def _report_gait_run(meta_rows, summary, skip_reasons, errors, stride_rows, stem_angles,
+                     params, yml_dir, pose_slp_suffix) -> list:
+    """Print the end-of-stage summary and warnings. Returns the warning texts (for the manifest).
+
+    Reporting only: it reads the rows that were already written and changes nothing.
+    """
+    out: list = []
+    try:
+        print(f"  Gait extraction summary: {len(meta_rows)} videos in the table, {summary['ok']} processed, "
+              f"{summary['skipped']} skipped, {summary['errors']} errors, {summary['total_strides']:,} strides")
+        for why, n in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+            extra = f" (<video name>{pose_slp_suffix})" if why == "no pose file" else ""
+            print(f"    skipped {n}: {why}{extra}")
+        override = params.get("PX_PER_CM_OVERRIDE") if isinstance(params, dict) else None
+        if override:
+            print(f"    px/cm source: PX_PER_CM_OVERRIDE = {float(override):g} (one constant for every video)")
+        else:
+            print(f"    px/cm source: derived per video from the ROI file (segment2 width = "
+                  f"{params.get('MAZE_WIDTH_CM', 10.0)} cm)")
+
+        def warn(msg):
+            out.append(msg)
+            print(f"  WARNING: {msg}")
+
+        if stride_rows:
+            i_stem, i_fps, i_cal = (STRIDE_HEADER.index("stem"), STRIDE_HEADER.index("fps"),
+                                    STRIDE_HEADER.index("px_per_cm"))
+            per_video = {}
+            for r in stride_rows:
+                per_video.setdefault(r[i_stem], (float(r[i_fps]), float(r[i_cal])))
+            # the px_per_cm column stores cm per px; 1.0 is the "calibration failed" sentinel
+            sentinel = sorted(st for st, (_, cal) in per_video.items() if cal == 1.0)
+            if sentinel:
+                warn(f"{len(sentinel)} video(s) have NO usable calibration (px/cm could not be derived from the "
+                     f"ROI file; the sentinel 1.0 was written). Every cm value of these videos is invalid - fix "
+                     f"the ROI file or set px_per_cm_override, or exclude them: "
+                     f"{', '.join(sentinel[:5])}{' ...' if len(sentinel) > 5 else ''}")
+            low_fps = sorted((st, fps) for st, (fps, _) in per_video.items() if fps < _GAIT_MIN_FPS)
+            if low_fps:
+                warn(f"{len(low_fps)} video(s) have fps < {_GAIT_MIN_FPS:g} (e.g. {low_fps[0][0]}: "
+                     f"{low_fps[0][1]:g} fps). Stride detection works in frames, so swing/stride timing and "
+                     f"stride length are not comparable with >= 100 fps recordings.")
+            low_res = sorted((st, 1.0 / cal) for st, (_, cal) in per_video.items()
+                             if cal not in (0.0, 1.0) and (1.0 / cal) < _GAIT_MIN_PX_PER_CM)
+            if low_res:
+                warn(f"{len(low_res)} video(s) have a scale below {_GAIT_MIN_PX_PER_CM:g} px/cm (e.g. "
+                     f"{low_res[0][0]}: {low_res[0][1]:.1f} px/cm). Paw tracking at this resolution is "
+                     f"too coarse for the gait metrics.")
+        off_axis = sorted((v, a) for v, a in stem_angles.items() if abs(a) > _STEM_ANGLE_TOL_DEG)
+        if off_axis:
+            warn(f"in {len(off_axis)} video(s) the maze stem (ROI segment1 -> junction) does not run left to "
+                 f"right in the image (e.g. {off_axis[0][0]}: {off_axis[0][1]:+.0f} deg). The gait metrics "
+                 f"assume the stem runs left to right in the image (stride_length_cm sign, step length and "
+                 f"the forward-direction filter depend on it).")
+
+        # Calibration / body length / fps sanity check, as a message only (python -m
+        # stride.stages.safety_checks --gait <file> --expect-pxcm <board value> is the gate).
+        if stride_rows:
+            try:
+                from stride.stages.safety_checks import check_body_length, check_calibration, check_fps
+                i_bl = STRIDE_HEADER.index("body_length_cm")
+                rows = [{"px_per_cm": r[i_cal], "body_length_cm": r[i_bl], "fps": r[i_fps]} for r in stride_rows]
+                findings = check_calibration(rows) + check_body_length(rows) + check_fps(rows)
+                bad = [f for f in findings if f.severity == "FAIL"]
+                if bad:
+                    print("  Calibration check (message only, no output is changed):")
+                    for f in bad:
+                        print(f"    FAIL [{f.check}] {f.message}")
+                        out.append(f"calibration check FAIL [{f.check}] {f.message}")
+                else:
+                    print("  Calibration check (message only): px/cm, body length and fps look consistent. "
+                          "To verify against a board reading: python -m stride.stages.safety_checks "
+                          "--gait <gait_per_stride.csv> --expect-pxcm <value>")
+            except Exception:
+                pass
+    except Exception as exc:  # reporting must never stop the stage
+        print(f"  (end-of-stage report skipped: {type(exc).__name__}: {exc})")
+    return out
