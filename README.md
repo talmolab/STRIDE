@@ -320,6 +320,8 @@ stride/
       video.py             # Video I/O utilities
 ```
 
+`lab/` holds the authors' own data-intake workflow (`stride-lab`); it is not needed to use STRIDE — see [docs/lab-workflow.md](docs/lab-workflow.md).
+
 ## Key Outputs
 
 | Stage | Output | Description |

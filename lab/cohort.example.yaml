@@ -1,0 +1,61 @@
+# Cohort config for `stride-lab`  (stride-lab run --config this_file.yaml)
+# One file per cohort. Keep it OUTSIDE the repository: it names your folders and models.
+# Every key except raw_dir and output_dir is optional; a command-line option wins over the file.
+
+cohort: my_cohort                              # label used in titles and summaries (default: the raw folder's name)
+raw_dir: /path/to/cohorts/my_cohort            # raw clips + the recorder export; becomes <DATE>-DAY{N}/ folders
+metadata: null                                 # recorder export (*_trials_full.csv); default: the most complete one under raw_dir
+records_dir: null                              # plans, whiteboard crops, sign-offs, scale check, logs (default <raw_dir>/_intake)
+output_dir: /path/to/output/my_cohort          # the STRIDE tables, inference outputs, summaries
+
+verifier: "name of the person who reads the boards"
+allow_placeholders: false                      # true when 1-2 digit mouse ids ARE the ids written on the whiteboards
+allow_mismatch: false                          # sort although a day's clip count differs from the metadata (never blindly)
+fixed_run_order: false                         # sign the boards off without reading the numbers (see docs/lab-workflow.md)
+genotype: null                                 # one genotype for every mouse; default: the export's genotype column
+
+camera:                                        # how this rig names its clips and looks (defaults: the DJI rig)
+  raw_pattern: null                            # regex with named groups `date` (YYYYMMDD) and `seq`; null = DJI names
+  extensions: null                             # e.g. mp4
+  crop_rotation: null                          # ccw90 | cw90 | 180 | none - turns whiteboard crops upright
+  rail_crop: null                              # y0,y1,x0,x1 of the straight corridor (cross-check only), or "none"
+
+board:                                         # the ChArUco board lying in view
+  squares: 14x9
+  square_mm: 20
+  marker_mm: 15
+  dictionary: DICT_5X5_250
+
+calibration:                                   # px/cm is measured on every recording day (the camera-moved check)
+  clips_per_day: 3                             # clips measured per day, spread over the day
+  warn_pct: 0.5                                # a day this far from the cohort median: warning
+  stop_pct: 1.0                                # this far: the day is held until a person records a decision
+  reference_px_per_cm: null                    # the previous cohort on the same rig, e.g. 26.02 (warning only)
+  px_per_cm: null                              # an explicit value for the analysis; the days are still measured and compared
+  on_unmeasured_day: warn                      # warn | stop - a day on which no board reading was possible
+
+roi_position:                                  # the maze's place in the image per day (report + warning only)
+  drift_warn_px: 25
+  stem_angle_warn_deg: 1.0
+
+models:                                        # the finalized SLEAP models (one or two folders each)
+  pose:
+    - /path/to/models/pose/centroid
+    - /path/to/models/pose/centered_instance
+  roi:
+    - /path/to/models/roi/centroid
+    - /path/to/models/roi/centered_instance
+
+inference:
+  devices: [cuda:0, cuda:1, cuda:2, cuda:3]    # one entry per GPU ([cpu] works too)
+  workers_per_device: 2                        # 4 GPUs x 2 = 8 workers, each taking its share of a day's clips
+  batch_size: 16
+  sidecars: videos                             # videos: pose and ROI files end up next to the clips | output: only under output_dir
+  skip: false                                  # true: analyse only clips that already have pose and ROI files
+
+analysis:
+  workers: 32                                  # CPU worker processes
+  decision_window_s: 150                       # trial length: an arm entry later than this is no decision
+  distortion_check: false
+  stride_detection: {}                         # optional overrides; defaults are the published values
+  stride_filtering: {}

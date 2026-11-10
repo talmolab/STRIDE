@@ -39,7 +39,7 @@ Three functions for three audiences, one repository.
 
 ```
 src/stride/     public package: tmaze, gait, calibrate, the stages
-lab/            lab intake package (sort, whiteboard check, rename); paths and models come from a config outside the repo
+lab/            the lab layer, a package of its own (`pip install -e lab/`, command `stride-lab`); paths and models come from a config outside the repo
 tests/          mock data generators and tests for all three functions
 docs/           tmaze.md, gait.md, lab-workflow.md
 README.md       the two public pipelines only
@@ -62,8 +62,8 @@ PLAN.md         this file
 |---|---|---|
 | 1 | Core fixes: launching, file discovery, stage chaining, honest exits, run manifests and warnings, snout fix, mock test set | merged 2026-11-10 (PR #9) |
 | 2 | ChArUco calibration (`stride calibrate`) + `stride tmaze` (any file name, optional metadata, decision-rules step, ROI best-instance + consensus fallback, config-then-CLI, step switches) | merged 2026-11-10 (PR #10) |
-| 3 | `stride gait` (start from a folder of videos + pose files, px/cm without ROI, keypoint-name mapping, orientation warning) | built and checked; PR opened 2026-11-10 |
-| 4 | `lab/` intake (`stride-lab`), checked by reproducing a real cohort's canonical outputs | intake code built and checked against four real days' rename logs (side branch `step2-rename-calib`, `lab/`); packaging and integration with `stride tmaze` not started |
+| 3 | `stride gait` (start from a folder of videos + pose files, px/cm without ROI, keypoint-name mapping, orientation warning) | merged 2026-11-10 (PR #11) |
+| 4 | `lab/` (`stride-lab`): sort, whiteboard check, rename, per-day scale check, then the public T-maze pipeline with the lab's models; checked by reproducing two real cohorts end to end | built and checked on branch `step4-lab` (2026-11-10); not yet proposed as a PR |
 | 5 | Release: v1.0.0 version bump and tag, docs site, README restructure, CI on three operating systems, repository hygiene (lab paths out of config.yaml / RUNBOOK.md / docstrings), model and example-data deposit, software DOI, visibility switch | not started |
 
 Step 2 notes.
@@ -89,6 +89,28 @@ Step 3 notes.
 - One scale per run; without `--px-per-cm` and without a board in view the run stops (there is no ROI to fall back on).
 - Known existing-path matter, not changed: the GoPro cohort's April gait file was written with fps 120.0 where the
   videos now read 119.88.
+
+Step 4 notes (STRIDE Lab, design agreed 2026-11-10).
+- Same camera and set-up all the time; the naming system `Day{N}_{Mouse}_Trial{T}` is kept.
+- px/cm is not a pinned value. `stride-lab` reads the in-view ChArUco on a few clips of every recording day
+  (chosen automatically), writes a per-day table, and uses the median over the days for the gait stage. A day more
+  than 0.5 % from the cohort median is a warning; more than 1 % holds that day until a person records a decision
+  (accept the day with its own value, accept it with the cohort value, or exclude it). The cohort value is compared
+  with the previous cohort on the same rig as a warning only. The maze position per day (from the ROI files) is a
+  second, report-only check. All levels are config values.
+- This closes the open point of step 2 ("pins its recorded values or names its clips"): neither; the lab pipeline
+  measures every day. An explicit `calibration.px_per_cm` remains possible (used to reproduce an earlier cohort).
+- The two decisions a person makes: the whiteboard sign-off, and a recording day flagged by the scale check.
+- No analysis code in `lab/`: the tables come from `stride tmaze`, inference from the public inference commands with
+  their worker options, the gait gate from `stride.stages.safety_checks`.
+- Checked on real data (inputs read-only, clips as symlinks under their camera names): two cohorts (784 and 384
+  clips) go from the camera names to the lab's final names (all clips) and to decisions and gait tables identical to
+  the canonical ones when the recorded px/cm is given; with the per-day measurement one cohort lands on its recorded
+  value (26.02) and the other 0.08 % below it (26.06 against 26.08).
+- On six recorded cohorts the per-day values stay within 0.4 % of their cohort median, except the first cohort
+  (June), where the board was not fixed in view: 2 days above the warning level, 1 above the stop level, and the
+  maze position moved by 30-57 px from day 8 on.
+- Details: `docs/lab-workflow.md`; config template `lab/cohort.example.yaml`.
 
 ## 4. How changes are checked
 

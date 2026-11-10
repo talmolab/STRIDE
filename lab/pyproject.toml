@@ -1,0 +1,29 @@
+[project]
+name = "stride-lab"
+version = "0.1.0"
+description = "STRIDE Lab: raw camera clips + recorder metadata -> named clips -> scale check -> the STRIDE T-maze pipeline"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "stride",                     # the public package in the repository root: pip install -e . first
+    "click>=8.0",
+    "numpy>=1.24",
+    "opencv-python>=4.8,<4.14",   # same pin as the public package (ChArUco detector)
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+stride-lab = "stride_lab.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stride_lab*"]
