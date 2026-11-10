@@ -127,6 +127,62 @@ Notes:
   the montage under `roi/roi_consensus_qc/`.
 - The mock batch is drawn at 16 px/cm, so the gait step prints its "below 20 px/cm" warning.
 
+## STRIDE Gait (pose in, gait tables out)
+
+`stride gait` is the gait analysis on its own, for recordings without a maze: you bring videos
+with pose tracking, STRIDE gets the scale (px/cm) and writes the per-stride, per-step and
+per-video gait tables. No ROI model, no file renaming, no trial or genotype analysis. Full
+description, including how every column is computed: [`docs/gait.md`](docs/gait.md).
+
+```bash
+# pose files (<video name>.slp) next to the videos or in --pose-dir; scale measured by you
+stride gait /data/videos --px-per-cm 26.1 --out /data/gait_out
+
+# no pose files yet: your trained pose model makes them; scale from the ChArUco board in view
+stride gait /data/videos \
+    --pose-model /models/pose/centroid --pose-model /models/pose/centered_instance \
+    --out /data/gait_out
+
+# or from a config file; anything given on the command line overrides it
+stride init-config gait -o my_gait.yaml
+stride gait --config my_gait.yaml
+```
+
+Try it on mock data (no real videos, models or GPU needed: a synthetic mouse walking a straight
+line, with its pose files):
+
+```bash
+pip install -e ".[dev]"
+python tests/mock/make_mock_gait.py --out tests/mock/_data_gait --only runway
+stride gait tests/mock/_data_gait/runway/videos --px-per-cm 24 \
+    --metadata tests/mock/_data_gait/runway/metadata.csv --out mock_output/gait
+```
+
+`mock_output/gait/` then holds:
+
+| | |
+|---|---|
+| `SUMMARY.md` | what ran, counts per step, px/cm and where it came from, warnings, videos left out and why |
+| `gait/gait_per_stride.csv`, `gait_per_stride_filtered.csv` | one row per stride (all strides / the strides that pass the filters) |
+| `gait/gait_per_step.csv`, `gait_per_video.csv`, `pose_keypoint_confidence_by_video.csv` | per hind-paw swing, per video, and the per-video keypoint confidence |
+| `scale/`, `pose/` | the scale and its source; pose files made by the run |
+| `stride_gait_run_manifest.yaml`, `gait_run.log` | resolved settings, model, code version; everything printed |
+
+Notes:
+
+- **Keypoints**: `snout`, `tailbase` and at least one landmark per hind paw are needed, `tailtip` is
+  optional. A skeleton with other node names works with a mapping (`--keypoint nose=snout`, or
+  `keypoints:` in the config); the run checks this before any analysis and says what is missing.
+- **Scale**: a value you give (`--px-per-cm`) wins; otherwise the ChArUco board in view
+  ([`docs/CALIBRATION.md`](docs/CALIBRATION.md)). Without either the run stops: there is no maze to
+  take the scale from.
+- **Metadata is optional**: a CSV with a `video` column (file name); its other columns (animal,
+  sex, group, ...) are added to the tables.
+- **Direction**: the step and stride measures assume the animal walks left-right in the image; the
+  run prints the share of walking frames for which that holds and warns when it is below half.
+- **Every step can be switched off** (`--skip STEP`, or `steps:` in the config). A second run does
+  not repeat finished work.
+
 ## Quick Start
 
 ### Try it on the mock data (no videos, models or GPU needed)

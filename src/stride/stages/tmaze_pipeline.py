@@ -171,38 +171,46 @@ def _deep_update(base: dict, new: dict) -> dict:
     return base
 
 
-def load_settings(config_path=None, overrides: Optional[dict] = None) -> dict:
-    """Defaults <- YAML config <- overrides (command-line options that were given)."""
-    settings = copy.deepcopy(DEFAULTS)
+def load_settings(config_path=None, overrides: Optional[dict] = None, *, defaults: Optional[dict] = None,
+                  steps: Optional[list] = None, pipeline: str = "tmaze",
+                  list_keys: tuple = ("pose_model", "roi_model", "exclude_dirs")) -> dict:
+    """Defaults <- YAML config <- overrides (command-line options that were given).
+
+    ``defaults`` / ``steps`` / ``pipeline`` / ``list_keys`` let `stride gait` use the same loader
+    with its own settings; without them this is the T-maze loader.
+    """
+    defaults = DEFAULTS if defaults is None else defaults
+    steps = STEPS if steps is None else steps
+    settings = copy.deepcopy(defaults)
     if config_path:
         p = Path(config_path)
         if not p.exists():
-            raise TmazeError(f"config file not found: {p} (write a template with `stride init-config tmaze`)")
+            raise TmazeError(f"config file not found: {p} (write a template with `stride init-config {pipeline}`)")
         with open(p, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         if not isinstance(cfg, dict):
-            raise TmazeError(f"{p} is not a YAML mapping (see `stride init-config tmaze`)")
-        unknown = sorted(set(cfg) - set(DEFAULTS))
+            raise TmazeError(f"{p} is not a YAML mapping (see `stride init-config {pipeline}`)")
+        unknown = sorted(set(cfg) - set(defaults))
         if unknown:
-            raise TmazeError(f"{p}: unknown setting(s) {unknown}. Known settings: {sorted(DEFAULTS)}")
-        bad_steps = sorted(set(cfg.get("steps") or {}) - set(STEPS))
+            raise TmazeError(f"{p}: unknown setting(s) {unknown}. Known settings: {sorted(defaults)}")
+        bad_steps = sorted(set(cfg.get("steps") or {}) - set(steps))
         if bad_steps:
-            raise TmazeError(f"{p}: unknown step(s) {bad_steps} under `steps:`. Steps: {STEPS}")
+            raise TmazeError(f"{p}: unknown step(s) {bad_steps} under `steps:`. Steps: {steps}")
         _deep_update(settings, cfg)
         settings["config_file"] = str(p)
     _deep_update(settings, overrides or {})
-    for key in ("pose_model", "roi_model", "exclude_dirs"):
+    for key in list_keys:
         v = settings.get(key)
         settings[key] = [] if v is None else ([v] if isinstance(v, (str, Path)) else list(v))
     return settings
 
 
-def write_config_template(path, overwrite: bool = False) -> Path:
+def write_config_template(path, overwrite: bool = False, template: Optional[str] = None) -> Path:
     path = Path(path)
     if path.exists() and not overwrite:
         raise TmazeError(f"{path} already exists (pass --overwrite to replace it)")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    path.write_text(CONFIG_TEMPLATE if template is None else template, encoding="utf-8")
     return path
 
 
@@ -408,6 +416,9 @@ def build_trials(videos: list, meta: Optional[dict]) -> list:
 # --------------------------------------------------------------------------------------------
 
 class TmazeRun:
+    _no_pose_model_hint = ("Use --skip-inference to analyse only the videos that already have pose "
+                           "and ROI files.")
+
     def __init__(self, settings: dict):
         self.s = settings
         if not settings.get("videos"):
@@ -498,24 +509,7 @@ class TmazeRun:
 
     # ---- steps -----------------------------------------------------------------------------
     def step_discover(self):
-        videos, n_excl = discover_videos(self.s["videos"], self.s.get("exclude_dirs"))
-        if not videos:
-            raise TmazeError(f"no .mp4 videos found for {self.s['videos']} (folders are searched "
-                             f"recursively, any letter case)")
-        stems: dict = {}
-        for v in videos:
-            stems.setdefault(v.stem, []).append(v)
-        dup = {k: v for k, v in stems.items() if len(v) > 1}
-        if dup:
-            k, v = next(iter(dup.items()))
-            raise TmazeError(f"{len(dup)} file name(s) are used by more than one video (e.g. {k}: "
-                             f"{v[0]} and {v[1]}). Every output table is keyed by the video file name, "
-                             f"so the names must be unique - rename the files or run the folders separately.")
-        self.videos = videos
-        extra = f"; {n_excl} under excluded folder(s) {self.s.get('exclude_dirs')} left out" if n_excl else ""
-        self.line("discover", f"{len(videos)} videos in {len({v.parent for v in videos})} folder(s){extra}")
-        self.results["discover"] = {"videos": len(videos), "excluded": n_excl}
-
+        videos = self._find_videos()
         meta = load_metadata(self.s["metadata"]) if self.s.get("metadata") else None
         self.trials = build_trials(videos, meta)
         n_named = sum(1 for t in self.trials if t["day"] and t["mouse"])
@@ -533,6 +527,27 @@ class TmazeRun:
                           f"{'file name' if meta['video_col'] else 'day + mouse from Day<N>_<mouse>_Trial<T> file names'})")
         self.results["metadata"] = {"file": self.s.get("metadata"), "reward_known": n_rew,
                                     "day_mouse_known": n_named, "videos": len(videos)}
+
+    def _find_videos(self) -> list:
+        """The video search shared by `stride tmaze` and `stride gait` (sets ``self.videos``)."""
+        videos, n_excl = discover_videos(self.s["videos"], self.s.get("exclude_dirs"))
+        if not videos:
+            raise TmazeError(f"no .mp4 videos found for {self.s['videos']} (folders are searched "
+                             f"recursively, any letter case)")
+        stems: dict = {}
+        for v in videos:
+            stems.setdefault(v.stem, []).append(v)
+        dup = {k: v for k, v in stems.items() if len(v) > 1}
+        if dup:
+            k, v = next(iter(dup.items()))
+            raise TmazeError(f"{len(dup)} file name(s) are used by more than one video (e.g. {k}: "
+                             f"{v[0]} and {v[1]}). Every output table is keyed by the video file name, "
+                             f"so the names must be unique - rename the files or run the folders separately.")
+        self.videos = videos
+        extra = f"; {n_excl} under excluded folder(s) {self.s.get('exclude_dirs')} left out" if n_excl else ""
+        self.line("discover", f"{len(videos)} videos in {len({v.parent for v in videos})} folder(s){extra}")
+        self.results["discover"] = {"videos": len(videos), "excluded": n_excl}
+        return videos
 
     def step_distortion(self):
         step = "distortion_check"
@@ -700,8 +715,7 @@ class TmazeRun:
             if not self.s["pose_model"]:
                 raise TmazeError(f"{len(need)} video(s) have no pose file: pose inference needs your trained "
                                  f"pose model (--pose-model <centroid> --pose-model <centered_instance>, or "
-                                 f"`pose_model:` in the config). Use --skip-inference to analyse only the "
-                                 f"videos that already have pose and ROI files.")
+                                 f"`pose_model:` in the config). {self._no_pose_model_hint}")
             dev = self.device()
             try:
                 models = resolve_model_paths(self.s["pose_model"], "pose")

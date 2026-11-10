@@ -61,8 +61,8 @@ PLAN.md         this file
 | Step | Content | Status |
 |---|---|---|
 | 1 | Core fixes: launching, file discovery, stage chaining, honest exits, run manifests and warnings, snout fix, mock test set | merged 2026-11-10 (PR #9) |
-| 2 | ChArUco calibration (`stride calibrate`) + `stride tmaze` (any file name, optional metadata, decision-rules step, ROI best-instance + consensus fallback, config-then-CLI, step switches) | built and checked; PR opened 2026-11-10 |
-| 3 | `stride gait` (start from a folder of videos + pose files, px/cm without ROI, keypoint-name mapping, orientation warning) | not started |
+| 2 | ChArUco calibration (`stride calibrate`) + `stride tmaze` (any file name, optional metadata, decision-rules step, ROI best-instance + consensus fallback, config-then-CLI, step switches) | merged 2026-11-10 (PR #10) |
+| 3 | `stride gait` (start from a folder of videos + pose files, px/cm without ROI, keypoint-name mapping, orientation warning) | built and checked; PR opened 2026-11-10 |
 | 4 | `lab/` intake (`stride-lab`), checked by reproducing a real cohort's canonical outputs | intake code built and checked against four real days' rename logs (side branch `step2-rename-calib`, `lab/`); packaging and integration with `stride tmaze` not started |
 | 5 | Release: v1.0.0 version bump and tag, docs site, README restructure, CI on three operating systems, repository hygiene (lab paths out of config.yaml / RUNBOOK.md / docstrings), model and example-data deposit, software DOI, visibility switch | not started |
 
@@ -79,6 +79,16 @@ Step 2 notes.
 - `stride tmaze` skips folders named `waste`; a run with left-out videos exits 0 and lists them (`--strict` makes it
   an error); the consensus ROI is refused above 25 px drift (`roi.drift_max_px`).
 - Not yet run on Windows or macOS.
+
+Step 3 notes.
+- `stride gait` reproduces the canonical gait tables of one DJI cohort (8,219 strides) and matches the existing entry
+  point on 293 videos of a GoPro cohort, without using any ROI.
+- Skeletons with other node names are mapped with `keypoints:`; one landmark per hind paw and a missing tail tip are
+  accepted; a missing snout, tail base or hind paw is refused. For a non-STRIDE skeleton the confidence filter uses
+  the mean over the skeleton's own nodes.
+- One scale per run; without `--px-per-cm` and without a board in view the run stops (there is no ROI to fall back on).
+- Known existing-path matter, not changed: the GoPro cohort's April gait file was written with fps 120.0 where the
+  videos now read 119.88.
 
 ## 4. How changes are checked
 

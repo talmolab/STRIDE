@@ -790,21 +790,136 @@ def tmaze(ctx, videos, config_path, output, pose_model, roi_model, metadata, pos
         raise SystemExit(1)
 
 
+@main.command("gait")
+@click.argument("videos", nargs=-1, type=click.Path())
+@click.option("--config", "-c", "config_path", type=click.Path(), default=None,
+              help="YAML config (`stride init-config gait` writes a template). Options given on "
+                   "the command line override the config.")
+@click.option("--out", "-o", "output", type=click.Path(), default=None, help="Output folder")
+@click.option("--pose-dir", type=click.Path(), default=None,
+              help="Folder with existing pose files, when they are not next to the videos")
+@click.option("--pose-suffix", type=str, default=None, help="Pose file = <video name><suffix> (default .slp)")
+@click.option("--pose-model", "pose_model", multiple=True, type=click.Path(),
+              help="Your trained pose model (once or twice): pose inference runs for videos without a pose file")
+@click.option("--px-per-cm", "px_per_cm", type=float, default=None,
+              help="Scale you measured yourself (wins over the ChArUco board)")
+@click.option("--board-squares-x", type=int, default=None, help="ChArUco board: squares along x")
+@click.option("--board-squares-y", type=int, default=None, help="ChArUco board: squares along y")
+@click.option("--board-square-mm", type=float, default=None, help="ChArUco board: square size in mm")
+@click.option("--board-marker-mm", type=float, default=None, help="ChArUco board: marker size in mm")
+@click.option("--board-dict", type=str, default=None, help="ChArUco board: dictionary, e.g. DICT_5X5_250")
+@click.option("--keypoint", "keypoint", multiple=True, metavar="THEIR_NAME=STRIDE_NAME",
+              help="Node name in your pose files = STRIDE keypoint name (repeatable), e.g. nose=snout")
+@click.option("--metadata", "-m", type=click.Path(), default=None,
+              help="Optional CSV with a `video` column (file name); its other columns are added to the tables")
+@click.option("--fps", "fps_default", type=float, default=None,
+              help="Frame rate used only when it cannot be read from a video (default 120)")
+@click.option("--device", type=str, default=None, help="Inference device: auto (default), cuda, cuda:0, cpu")
+@click.option("--workers", "-w", type=int, default=None, help="CPU worker processes (default 4)")
+@click.option("--batch-size", type=int, default=None, help="Pose inference batch size (default 16)")
+@click.option("--skip", "skip", multiple=True, metavar="STEP",
+              help="Switch a step off (repeatable): calibrate, pose_inference, gait_extraction, "
+                   "keypoint_confidence, stride_filtering")
+@click.option("--enable", "enable", multiple=True, metavar="STEP", help="Switch a step on (repeatable)")
+@click.option("--stop-after", "stop_after", type=str, default=None, metavar="STEP", help="Stop after this step")
+@click.option("--force", is_flag=True, help="Redo steps even when their outputs are up to date")
+@click.option("--strict", is_flag=True, help="Exit with an error when any video was left out")
+@click.pass_context
+def gait(ctx, videos, config_path, output, pose_dir, pose_suffix, pose_model, px_per_cm,
+         board_squares_x, board_squares_y, board_square_mm, board_marker_mm, board_dict, keypoint, metadata,
+         fps_default, device, workers, batch_size, skip, enable, stop_after, force, strict):
+    """STRIDE Gait: videos with pose tracking in, per-stride and per-video gait tables out.
+
+    No maze ROI is needed. VIDEOS is a folder (searched recursively), a video file, or a pattern;
+    several may be given. Pose files (<video name>.slp) are taken from next to the videos or from
+    --pose-dir; with --pose-model they are made first. The scale comes from --px-per-cm or from a
+    ChArUco board in view. Steps: discover, scale, pose inference, stride detection, keypoint
+    confidence, stride filtering. Finished work is not repeated on a second run.
+
+    \b
+    stride gait /data/videos --px-per-cm 26.1 -o out
+    stride gait /data/videos --pose-model P1 --pose-model P2 -o out      # scale from the ChArUco board
+    stride gait --config my_gait.yaml
+    """
+    from stride.stages.gait_pipeline import STEPS, GaitRun, load_settings
+    from stride.stages.tmaze_pipeline import TmazeError
+
+    bad = [s for s in list(skip) + list(enable) if s not in STEPS]
+    if bad:
+        _fail(f"unknown step(s) {bad}. Steps: {', '.join(STEPS)}", 2)
+    if stop_after and stop_after not in STEPS:
+        _fail(f"--stop-after {stop_after}: unknown step. Steps: {', '.join(STEPS)}", 2)
+    kp_map = {}
+    for item in keypoint:
+        theirs, sep, ours = str(item).partition("=")
+        if not sep or not theirs.strip() or not ours.strip():
+            _fail(f"--keypoint {item!r}: write it as THEIR_NAME=STRIDE_NAME, e.g. --keypoint nose=snout", 2)
+        kp_map[theirs.strip()] = ours.strip()
+
+    ov: dict = {}
+    if videos:
+        ov["videos"] = list(videos) if len(videos) > 1 else videos[0]
+    for key, val in (("output", output), ("device", device), ("workers", workers), ("batch_size", batch_size),
+                     ("pose_suffix", pose_suffix), ("stop_after", stop_after), ("pose_dir", pose_dir),
+                     ("metadata", metadata), ("fps_default", fps_default)):
+        if val is not None:
+            ov[key] = val
+    if pose_model:
+        ov["pose_model"] = list(pose_model)
+    if kp_map:
+        ov["keypoints"] = kp_map
+    scale: dict = {}
+    if px_per_cm is not None:
+        scale["px_per_cm"] = px_per_cm
+    board = {k: v for k, v in (("squares_x", board_squares_x), ("squares_y", board_squares_y),
+                               ("square_mm", board_square_mm), ("marker_mm", board_marker_mm),
+                               ("dictionary", board_dict)) if v is not None}
+    if board:
+        scale["charuco"] = board
+    if scale:
+        ov["scale"] = scale
+    steps = {s: False for s in skip}
+    steps.update({s: True for s in enable})
+    if steps:
+        ov["steps"] = steps
+    if force:
+        ov["force"] = True
+    if strict:
+        ov["strict"] = True
+
+    try:
+        settings = load_settings(config_path, ov)
+        run = GaitRun(settings)
+    except TmazeError as exc:
+        _fail(str(exc), 2)
+    summary = run.run()
+    if not summary["ok"]:
+        raise SystemExit(1)
+    if settings.get("strict") and summary["skipped"]:
+        console.print(f"[bold red]ERROR:[/] {len(summary['skipped'])} video(s) were left out (--strict); "
+                      f"see SUMMARY.md", soft_wrap=True)
+        raise SystemExit(1)
+
+
 @main.command("init-config")
-@click.argument("pipeline", type=click.Choice(["tmaze"]), default="tmaze")
+@click.argument("pipeline", type=click.Choice(["tmaze", "gait"]), default="tmaze")
 @click.option("--output", "-o", "output_file", type=click.Path(), default=None,
-              help="File to write (default: ./stride_tmaze.yaml)")
+              help="File to write (default: ./stride_<pipeline>.yaml)")
 @click.option("--overwrite", is_flag=True, help="Replace the file when it exists")
 def init_config(pipeline, output_file, overwrite):
-    """Write a commented config template for `stride tmaze --config`."""
-    from stride.stages.tmaze_pipeline import TmazeError, write_config_template
+    """Write a commented config template for `stride tmaze --config` or `stride gait --config`."""
+    from stride.stages.tmaze_pipeline import TmazeError
+    if pipeline == "gait":
+        from stride.stages.gait_pipeline import write_config_template
+    else:
+        from stride.stages.tmaze_pipeline import write_config_template
 
     path = Path(output_file) if output_file else Path(f"stride_{pipeline}.yaml")
     try:
         write_config_template(path, overwrite=overwrite)
     except TmazeError as exc:
         _fail(str(exc), 2)
-    console.print(f"Wrote {path}. Edit it, then run: stride tmaze --config {path}", soft_wrap=True)
+    console.print(f"Wrote {path}. Edit it, then run: stride {pipeline} --config {path}", soft_wrap=True)
 
 
 @main.command("apply-decision-rules")
