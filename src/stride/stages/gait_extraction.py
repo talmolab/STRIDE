@@ -427,6 +427,21 @@ STEP_HEADER = [
 ]
 
 
+# Reporting side channel, filled by process_one_video and read by _process_wrapper in the same
+# process: video stem -> (walking frames, walking frames whose body axis is within 45 degrees of
+# the image x-axis). It never feeds a computation.
+_WALK_AXIS: dict = {}
+
+
+def _note_walk_axis(stem, ego_ang, v_tail, params) -> None:
+    try:
+        walking = np.isfinite(v_tail) & (v_tail >= params["MIN_WALK_VEL"]) & np.isfinite(ego_ang)
+        along = np.abs(np.cos(ego_ang[walking])) >= np.cos(np.pi / 4.0)
+        _WALK_AXIS[stem] = (int(walking.sum()), int(along.sum()))
+    except Exception:
+        pass
+
+
 def _extract_meta_fields(meta_row: dict, column_map: dict) -> tuple[str, str, str]:
     """Extract canonical mouse_id, sex, genotype from meta_row using column_map."""
     # Mouse ID: may be single column or composite
@@ -494,7 +509,16 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
     fps = read_fps(video, video_path, yml_dir=yml_dir, stem=stem) or params["DEFAULT_FPS"]
 
     # Node indices
-    def idx(name): return labels.skeleton.index(name)
+    # KEYPOINT_ALIASES is set only by `stride gait` for pose files whose skeleton uses other node
+    # names: STRIDE keypoint name -> node name in this pose file, or None for an optional keypoint
+    # the skeleton does not have (it then behaves like a keypoint that was never tracked). Without
+    # it every lookup is labels.skeleton.index(name), as always.
+    kp_alias = (params.get("KEYPOINT_ALIASES") or {}) if isinstance(params, dict) else {}
+    n_pose_nodes = len(labels.skeleton.node_names)
+    def idx(name):
+        if name in kp_alias and kp_alias[name] is None:
+            return n_pose_nodes          # the all-NaN column appended to the trajectories below
+        return labels.skeleton.index(kp_alias.get(name, name))
     snout_ind     = idx("snout")
     tail_base_ind = idx("tailbase")
     tail_tip_ind  = idx("tailtip")
@@ -503,6 +527,8 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
 
     # Trajectories
     trx_px = build_trx_from_labels(labels, video)
+    if any(v is None for v in kp_alias.values()):
+        trx_px = np.concatenate([trx_px, np.full((trx_px.shape[0], 1, 2), np.nan)], axis=1)
     trx_cm = trx_px / _px_per_cm
     trx_cm = interpolate_missing(trx_cm, kind="nearest")
     trx_cm = median_smoothing(trx_cm, params["SMOOTH_MED_WIN"])
@@ -543,6 +569,7 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
     T = node_vels.shape[0]
     t_ms = np.arange(T) / fps * 1000.0
     v_tail = node_vels[:, tail_base_ind]
+    _note_walk_axis(stem, ego_ang, v_tail, params)      # reporting only, see _process_wrapper
 
     # Extract canonical meta fields
     mouse_id, sex, genotype = _extract_meta_fields(meta_row, column_map)
@@ -742,7 +769,8 @@ KEYPOINT_NAMES = [
 
 def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
                                 output_path: Path, *, videos: list | None = None,
-                                pose_dir=None) -> Path:
+                                pose_dir=None, keypoint_names: list | None = None,
+                                aliases: dict | None = None) -> Path:
     """Compute per-video mean keypoint confidence from .slp files.
 
     Iterates over all videos, loads the paired .slp file, extracts confidence
@@ -750,6 +778,9 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
 
     ``videos`` (optional) gives the list explicitly instead of searching ``video_dir``;
     ``pose_dir`` (optional) is searched when no pose file sits next to a video.
+    ``keypoint_names`` (optional) replaces the 15 standard keypoints as the ``avg_<name>``
+    columns, and ``aliases`` (optional) maps such a name to the node name used in the pose
+    files; both are used only by `stride gait` for skeletons with other node names.
     """
     import sleap_io as sio
 
@@ -800,9 +831,10 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
 
             row = {"stem": vp.stem, "video_path": str(vp), "frames_total": T}
             row["frames_kept"] = max(conf_count.values()) if conf_count else 0
-            for kp in KEYPOINT_NAMES:
-                n = conf_count.get(kp, 0)
-                row[f"avg_{kp}"] = conf_sum.get(kp, 0.0) / n if n > 0 else 0.0
+            for kp in (keypoint_names or KEYPOINT_NAMES):
+                src = (aliases or {}).get(kp, kp)
+                n = conf_count.get(src, 0)
+                row[f"avg_{kp}"] = conf_sum.get(src, 0.0) / n if n > 0 else 0.0
             rows.append(row)
         except Exception as exc:
             unreadable.append(f"{vp.name}: {type(exc).__name__}: {exc}")
@@ -848,6 +880,7 @@ def _process_wrapper(args):
             out["reason"] = ("video file not found" if not vp.exists()
                              else f"no pose file ({vp.with_suffix(pose_slp_suffix).name})")
         else:
+            out["walk_axis"] = _WALK_AXIS.pop(vp.stem, None)
             from stride.utils.roi import roi_stem_angle_deg
             yml = resolve_roi_yml(vp.stem, yml_dir, vp)
             out["roi_stem_angle_deg"] = roi_stem_angle_deg(yml) if yml is not None else None
@@ -912,6 +945,7 @@ def run_gait_extraction(
     n_ok = n_skip = 0
     skip_reasons: dict = {}
     stem_angles: dict = {}
+    walk_axis: dict = {}
 
     # Build args for each video
     args_list = [
@@ -933,6 +967,8 @@ def run_gait_extraction(
                 n_ok += 1
                 if res.get("roi_stem_angle_deg") is not None:
                     stem_angles[Path(str(res["video"])).name] = res["roi_stem_angle_deg"]
+                if res.get("walk_axis"):
+                    walk_axis[Path(str(res["video"])).name] = list(res["walk_axis"])
             elif res["status"] == "skip":
                 n_skip += 1
                 why = res.get("reason", "video or pose file not found")
@@ -970,6 +1006,9 @@ def run_gait_extraction(
         "stride_csv": str(out_stride),
         "step_csv": str(out_step),
         "video_csv": str(out_video),
+        # reporting only: per video [walking frames, of which body axis within 45 deg of image x]
+        "walk_axis": walk_axis,
+        "error_list": list(errors),
     }
 
     # End-of-stage report (messages only; nothing above is changed by it)
