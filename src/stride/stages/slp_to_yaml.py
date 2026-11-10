@@ -1,7 +1,7 @@
 """
 Convert ROI SLP files to polygon YAML format.
 
-Adapted from: 2025-12-08-GoPro-roi-inference/02.slptoyml.py
+Ported from the ROI scripts of the original study.
 
 This module converts SLEAP keypoint predictions (23 ROI keypoints) to
 polygon YAML files with 7 regions (arm_right, junction, arm_left, segment1-4).

@@ -530,13 +530,11 @@ def main():
             rel, rel / "out")
         run("R-31", "runall", "run_all.py --stages 5 (unknown stage)", "core", "clear error", ra + ["--config", core["config_readme"],
             "--output", r / "bad" / "out", "--stages", "5"], REPO)
-        # the config as shipped, on a machine that does not have the lab's file share
+        # the config as shipped (config.example.yaml: its example batch has placeholder paths)
         sh = r / "shipped"
         sh.mkdir(parents=True, exist_ok=True)
-        (sh / "config.shipped_no_lab_share.yaml").write_text(
-            (REPO / "config.yaml").read_text().replace("/home/exx/vast/leo", "/nonexistent/lab_share"))
-        run("R-40", "runall", "run_all.py with the shipped config.yaml (lab paths do not exist on this machine)", "-",
-            "tells the user to edit the config", ra + ["--config", sh / "config.shipped_no_lab_share.yaml", "--output", sh / "out"],
+        run("R-40", "runall", "run_all.py with the shipped config.example.yaml, unedited (placeholder paths)", "-",
+            "tells the user to edit the config", ra + ["--config", REPO / "config.example.yaml", "--output", sh / "out"],
             REPO, sh / "out")
         # full config: every key the stage scripts read
         full_set = ["core", "layout_per_day_colocated", "layout_custom_pose_suffix", "ids_string", "meta_no_sex",

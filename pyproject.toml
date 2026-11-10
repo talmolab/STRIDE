@@ -1,12 +1,12 @@
 [project]
 name = "stride"
-version = "0.1.0"
-description = "STRIDE: Stride-level Tracking to Reveal Impairment before Dementia Emerges"
+version = "1.0.0"
+description = "STRIDE: Stride-level Tracking and Integrated Decision Extraction"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 authors = [
-    {name = "Yipeng Li", email = "y9li@ucsd.edu"},
+    {name = "Yipeng Li"},
 ]
 dependencies = [
     "click>=8.0",

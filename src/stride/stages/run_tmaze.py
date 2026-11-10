@@ -10,16 +10,13 @@
 Config-driven T-maze behavioral analysis (Stage 3) + post-processing.
 
 For finalized batches: loads existing decisions/events/metrics CSVs.
-For new batches: calls tmaze-pipeline package for decision analysis,
+For new batches: calls stride.stages.decision_analysis,
 then runs learning cycle splitting and metadata enrichment.
 
 PROVENANCE:
   Decision analysis: delegates to stride.stages.decision_analysis
-    (from automated_pipeline/tmaze-pipeline/, 752 lines)
-  Learning cycle splitting: extracted from
-    /home/exx/vast/leo/2025-12-10-GoPro-Tmaze-analysis/learning_cycle.ipynb
-    (cells 6 + 8, ~80 lines of logic)
-  Metadata enrichment: extracted from same notebook, cell 1 (~10 lines)
+  Learning cycle splitting and metadata enrichment: ported from the analysis notebooks of the
+  original study
 
 Usage:
     python -m stride.stages.run_tmaze --config config.yaml --output output
@@ -48,7 +45,7 @@ def load_config(config_path: str) -> dict:
 
 
 # ============================================================================
-# STAGE 3: Decision analysis (via tmaze-pipeline package)
+# STAGE 3: Decision analysis (stride.stages.decision_analysis)
 # ============================================================================
 
 def run_decisions(batch_cfg: dict, output_dir: Path, yml_dir: Path | None = None) -> dict[str, Path]:
@@ -103,7 +100,7 @@ def run_decisions(batch_cfg: dict, output_dir: Path, yml_dir: Path | None = None
 
 # ============================================================================
 # STAGE 3b: Metadata enrichment
-# PROVENANCE: learning_cycle.ipynb cell 1
+# PROVENANCE: analysis notebooks of the original study
 # ============================================================================
 
 def enrich_with_metadata(metrics_csv: Path, metadata_csv: Path,
@@ -168,7 +165,7 @@ def enrich_with_metadata(metrics_csv: Path, metadata_csv: Path,
 
 # ============================================================================
 # STAGE 3c: Learning cycle splitting
-# PROVENANCE: learning_cycle.ipynb cells 6 + 8
+# PROVENANCE: analysis notebooks of the original study
 # ============================================================================
 
 def split_learning_cycles(metrics_csv: Path, output_dir: Path,
@@ -284,7 +281,7 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
         video_dir = batch_cfg.get("video_dir")
         if not video_dir or not Path(video_dir).exists():
             raise StageError(f"video_dir not found: {video_dir!r}. Edit the batch in your config "
-                             f"(config.example.yaml is a template; config.yaml holds the paper's own cohorts).")
+                             f"(config.example.yaml in the repository is the template to copy).")
         paths = run_decisions(batch_cfg, batch_out, resolve_yml_dir(batch_cfg, output_dir, batch_key))
         decisions_path = str(paths["decisions_csv"])
         events_path = str(paths["events_csv"])

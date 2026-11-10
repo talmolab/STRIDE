@@ -1,5 +1,7 @@
 # STRIDE T-maze: the automated pipeline (`stride tmaze`)
 
+> Part of the STRIDE documentation: [docs index](README.md) · [documentation site](https://talmolab.github.io/STRIDE-docs/) · [project page](https://talmolab.github.io/STRIDE-page/)
+
 Videos of the T-maze task and your two trained SLEAP models go in; per-trial and per-stride CSV
 tables come out. One command, no file renaming, no genotype statistics.
 

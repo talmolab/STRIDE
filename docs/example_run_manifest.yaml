@@ -3,7 +3,7 @@
 # STRIDE writes one `<stage>_run_manifest.yaml` next to each stage's outputs, recording
 # *how* those outputs were produced. This file is a representative, sanitized example so
 # you can see the shape without running the pipeline — real manifests are generated at
-# runtime and are NOT committed to the repo. See README -> "Run manifest (provenance)".
+# runtime and are NOT committed to the repo. See README -> "What every run writes".
 #
 # Every field is best-effort: if a manifest cannot be assembled the pipeline still
 # succeeds and a warning is printed to stderr (provenance never breaks a completed run).
@@ -11,14 +11,14 @@
 manifest_schema_version: 1
 stage: decisions                       # which pipeline stage wrote this
 timestamp_utc: '2026-08-07T17:06:46+00:00'
-stride_version: 0.1.0
+stride_version: 1.0.0
 
 git:                                   # exactly which code produced the outputs
   available: true
   commit: 46074bc85314f0a2b1c9d7e3a8f45602cba1d9ee
   commit_short: 46074bc85314
   branch: main
-  describe: v0.1.0-3-g46074bc
+  describe: v1.0.0
   remote: https://github.com/talmolab/STRIDE.git
   last_commit_date: '2026-08-07T09:41:12-07:00'
   dirty: false                         # were there uncommitted edits at run time?
@@ -29,7 +29,7 @@ environment:                           # so the run can be reproduced
   hostname: gpu-workstation
   user: researcher
   packages:
-    stride: 0.1.0
+    stride: 1.0.0
     sleap-io: 0.7.1
     sleap-nn: 0.2.0
     numpy: 2.4.6
@@ -40,14 +40,14 @@ environment:                           # so the run can be reproduced
     pyyaml: 6.0.3
     click: 8.4.1
 
-command: stride analyze-decisions --config config.yaml
+command: stride tmaze --config my_tmaze.yaml
 
 models:                                # path + size/mtime fingerprint of each model
-- path: /data/models/finetune_final_v5/centroid/best.ckpt
+- path: /data/models/pose_model/centroid/best.ckpt
   exists: true
   size_bytes: 1507696075
   modified_utc: '2026-07-02T18:22:10+00:00'
-- path: /data/models/finetune_final_v5/centered_instance/best.ckpt
+- path: /data/models/pose_model/centered_instance/best.ckpt
   exists: true
   size_bytes: 1489233008
   modified_utc: '2026-07-02T18:24:51+00:00'
@@ -58,11 +58,11 @@ params:                                # the stage's settings
   smoothing_window: 5
 
 inputs:                                # what went in
-  video_dir: /data/tmaze/cohort_18mo/videos
+  video_dir: /data/tmaze/my_cohort/videos
   n_videos: 348
 
 outputs:                               # what came out (CSV row counts included)
-- path: /data/tmaze/cohort_18mo/decisions.csv
+- path: /data/tmaze/my_cohort/decisions.csv
   exists: true
   size_bytes: 84213
   modified_utc: '2026-08-07T17:06:46+00:00'

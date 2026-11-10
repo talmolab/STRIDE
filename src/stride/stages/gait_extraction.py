@@ -15,17 +15,15 @@ Gait extraction: keypoint preprocessing, stride detection, and metric computatio
 Stages 4-5 of the T-maze gait analysis pipeline.
 
 PROVENANCE:
-  Extracted from:
-    GoPro: /home/exx/vast/leo/2025-12-12-GoPro-Tmaz-gait-analysis/gait_output.ipynb, cell 1 (745 lines)
-    Basler: /home/exx/vast/leo/2025-10-03-Tmaze-gait/gait_output.ipynb, cell 2 (703 lines)
-  Both notebooks contain identical function code; only config (paths, column names) differs.
+  Ported from the analysis notebooks of the original study (one notebook per camera batch; the
+  function code was identical in both, only paths and column names differed).
   Functions copied verbatim; changes documented below.
 
 CHANGES FROM SOURCE:
   1. FIX: estimate_cm_per_px_from_yaml line 76 — `yml_path = YML_DIR / ...` changed to
      `yml_path = Path(yml_dir) / ...` (use function parameter instead of global)
   2. Globals PARAMS, YML_DIR replaced with function parameters
-  3. Column names abstracted via `column_map` for GoPro vs Basler differences
+  3. Column names abstracted via `column_map` (they differed between camera batches)
   4. Added run_gait_extraction() entry point wrapping the parallel loop
   5. Added compute_keypoint_confidence() for generating the confidence CSV
 """
@@ -65,7 +63,7 @@ DEFAULT_PARAMS = dict(
 
 
 # ============================================================================
-# PURE FUNCTIONS — copied verbatim from gait_output.ipynb cell 1
+# PURE FUNCTIONS — copied verbatim from the analysis notebooks of the original study
 # ============================================================================
 
 def interpolate_missing(data, kind="linear"):

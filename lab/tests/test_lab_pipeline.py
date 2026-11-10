@@ -293,14 +293,14 @@ def test_pick_day_clips_spreads_over_the_day():
 def test_analysis_metadata_follows_the_export(tmp_path):
     tf = tmp_path / "x_trials_full.csv"
     tf.write_text("day,date,phase,mouse,genotype,sex,reward,T1\n"
-                  "DAY1,2027-01-01,acq,16801,Tau,F,L,L\n"
-                  "DAY1,2027-01-01,acq,16801,Tau,F,R,L\n"          # a second row for the same (day, mouse): the first wins
-                  "day2,2027-01-02,acq,16801,,,r,L\n"
-                  "DAY2,2027-01-02,acq,16802,WT,M,,L\n")           # no reward: no row
+                  "DAY1,2027-01-01,acq,90001,Tau,F,L,L\n"
+                  "DAY1,2027-01-01,acq,90001,Tau,F,R,L\n"          # a second row for the same (day, mouse): the first wins
+                  "day2,2027-01-02,acq,90001,,,r,L\n"
+                  "DAY2,2027-01-02,acq,90002,WT,M,,L\n")           # no reward: no row
     m = build_analysis_metadata(tf, tmp_path / "m.csv")
     got = rows(tmp_path / "m.csv")
-    assert got == [dict(day="DAY1", mouse="16801", reward="L", sex="F", genotype="Tau", trials_in_export="1"),
-                   dict(day="DAY2", mouse="16801", reward="R", sex="F", genotype="Tau", trials_in_export="1")]
+    assert got == [dict(day="DAY1", mouse="90001", reward="L", sex="F", genotype="Tau", trials_in_export="1"),
+                   dict(day="DAY2", mouse="90001", reward="R", sex="F", genotype="Tau", trials_in_export="1")]
     assert build_analysis_metadata(tf, tmp_path / "m2.csv", genotype="KO")["rows"][0]["genotype"] == "KO"
     tf.write_text("day,date,mouse,reward\nDAY1,2027-01-01,1,L\nDAY1,2027-01-01,12,R\n")
     with pytest.raises(IntakeError, match="placeholder"):

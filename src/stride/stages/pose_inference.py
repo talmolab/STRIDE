@@ -1,7 +1,7 @@
 """
 Pose estimation inference using SLEAP models.
 
-Adapted from: 2025-11-04-GoPro_Tmaze_train/01.inference.py
+Ported from the inference scripts of the original study.
 
 This module runs pose estimation on videos to detect mouse body keypoints
 (snout, paws, tail, etc.) for all frames.

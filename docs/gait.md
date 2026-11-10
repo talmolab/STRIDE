@@ -1,5 +1,7 @@
 # STRIDE Gait: the gait-only pipeline (`stride gait`)
 
+> Part of the STRIDE documentation: [docs index](README.md) · [documentation site](https://talmolab.github.io/STRIDE-docs/) · [project page](https://talmolab.github.io/STRIDE-page/)
+
 Videos with pose tracking go in; per-stride, per-step and per-video gait tables come out. No maze
 and no ROI model are needed: you bring the pose tracking, STRIDE gets the scale (px/cm) and does
 the gait analysis.

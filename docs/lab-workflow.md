@@ -1,5 +1,7 @@
 # STRIDE Lab: the authors' own workflow (`stride-lab`)
 
+> Part of the STRIDE documentation: [docs index](README.md) · [documentation site](https://talmolab.github.io/STRIDE-docs/) · [project page](https://talmolab.github.io/STRIDE-page/)
+
 **This is not needed to use STRIDE.** It is how the authors take a recording session from the camera card to the
 STRIDE tables: the clips are renamed after a whiteboard check, the scale is checked on every recording day, and then
 the public T-maze pipeline (`stride tmaze`, [docs/tmaze.md](tmaze.md)) runs with the lab's finalized models. No
