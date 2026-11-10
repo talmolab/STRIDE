@@ -148,7 +148,8 @@ def check_roi_coverage(video_dir, expect_count=None, yml_dir=None) -> list[Findi
     """
     from stride.stages.decision_analysis import resolve_roi_yml
     d = Path(video_dir)
-    mp4 = sorted([p for p in d.rglob("*.MP4")] + [p for p in d.rglob("*.mp4")])
+    # a set: on a case-insensitive file system (Windows) both patterns match the same files
+    mp4 = sorted({p for pat in ("*.MP4", "*.mp4") for p in d.rglob(pat)})
     if not mp4:
         return [Finding("FAIL", "roi_coverage", f"NO videos found under {video_dir} (wrong path / glob?)")]
     if expect_count is not None and len(mp4) != expect_count:

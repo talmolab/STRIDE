@@ -343,7 +343,8 @@ def test_find_videos_is_recursive_and_case_insensitive(tmp_path):
         f = tmp_path / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(b"")
-    assert [p.name for p in find_videos(tmp_path, extensions=(".mp4",))] == ["b.MP4", "c.Mp4", "a.mp4"]
+    # the order follows the system's path ordering (case-sensitive or not), so compare the set of names
+    assert sorted(p.name for p in find_videos(tmp_path, extensions=(".mp4",))) == ["a.mp4", "b.MP4", "c.Mp4"]
     assert len(find_videos(tmp_path)) == 4                       # + the .avi
     assert find_videos(tmp_path / "a.mp4") == [tmp_path / "a.mp4"]
 
@@ -353,7 +354,7 @@ def test_manifest_fingerprints_the_checkpoint_not_the_folder(tmp_path):
     model = tmp_path / "pose_model" / "centroid"
     model.mkdir(parents=True)
     (model / "best.ckpt").write_bytes(b"x" * 12345)
-    (model / "training_config.yaml").write_text("a: 1\n")
+    (model / "training_config.yaml").write_bytes(b"a: 1\n")     # bytes: the same size on every system
     out = write_run_manifest(tmp_path / "out", "pose_inference", models=[model])
     m = yaml.safe_load(out.read_text())["models"][0]
     assert m["exists"] and m["size_bytes"] == 12345 + 5
