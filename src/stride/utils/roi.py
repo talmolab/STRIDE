@@ -19,7 +19,7 @@ def roi_stem_angle_deg(yml_path) -> Optional[float]:
     try:
         import yaml
 
-        with open(yml_path, "r") as f:
+        with open(yml_path, "r", encoding="utf-8") as f:
             y = yaml.safe_load(f) or {}
         cent = {}
         for r in y.get("rois", []):

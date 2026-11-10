@@ -45,7 +45,7 @@ from stride.stages.batch_paths import (
 
 
 def load_config(config_path: str) -> dict:
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

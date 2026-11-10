@@ -71,6 +71,62 @@ pip install -e ".[dev]"
 > per its own instructions. The `pip install` above provides the STRIDE analysis package (stages 3–10).
 > `sleap-io` (a dependency here) handles `.slp` file I/O only — it is not an inference engine.
 
+## STRIDE T-maze (one command)
+
+`stride tmaze` runs the whole T-maze pipeline on a folder of videos: it finds the videos, measures
+the scale, runs your pose model and your maze-ROI model, and writes the per-trial and per-stride
+tables. No file renaming and no genotype statistics; any file names work. Full description:
+[`docs/tmaze.md`](docs/tmaze.md).
+
+```bash
+stride tmaze /data/videos \
+    --pose-model /models/pose/centroid --pose-model /models/pose/centered_instance \
+    --roi-model  /models/roi/centroid  --roi-model  /models/roi/centered_instance \
+    --out /data/stride_out
+```
+
+Or put the settings in a file; anything given on the command line overrides it:
+
+```bash
+stride init-config tmaze -o my_tmaze.yaml     # commented template: videos, models, output, steps ...
+stride tmaze --config my_tmaze.yaml
+```
+
+Try it on the mock data (no videos, models or GPU needed; the two inference steps are skipped
+because the mock set ships its pose and ROI files):
+
+```bash
+pip install -e ".[dev]"
+python tests/mock/make_mock_dataset.py --out tests/mock/_data --only core
+stride tmaze tests/mock/_data/core/videos --roi-dir tests/mock/_data/core/roi_yml \
+    --metadata tests/mock/_data/core/meta_trials.csv --metadata tests/mock/_data/core/metadata.csv \
+    --out mock_output/tmaze --skip-inference
+```
+
+`mock_output/tmaze/` then holds:
+
+| | |
+|---|---|
+| `SUMMARY.md` | what ran, counts per step, px/cm and where it came from, warnings, videos left out and why |
+| `decisions/decisions.csv`, `decisions_clean.csv`, `events.csv`, `metrics.csv` | per trial: arm choice, entry time, latencies, snout probes, junction exploration (`decisions_clean.csv` = after the two protocol rules) |
+| `gait/gait_per_stride.csv`, `gait_per_stride_filtered.csv`, `gait_per_step.csv`, `gait_per_video.csv` | per stride / step / video gait tables |
+| `scale/`, `roi/`, `pose/` | the scale and its source, the ROI of every video and whether it was detected or borrowed, pose files made by the run |
+| `tmaze_run_manifest.yaml`, `tmaze_run.log` | resolved settings, models, code version; everything printed |
+
+Notes:
+
+- **Metadata is optional.** Without it the choice, timing and probe columns are written and the
+  correctness columns stay empty. A metadata CSV has a `video` column (file name) or `day` + `mouse`,
+  plus `reward` (L/R); optional `sex`, `genotype`.
+- **Scale**: a value you give (`--px-per-cm`) wins; otherwise the ChArUco board in view (also available
+  on its own: `stride calibrate`, see [`docs/CALIBRATION.md`](docs/CALIBRATION.md)); otherwise the
+  corridor width of each video's ROI (`--maze-width-cm`, default 10).
+- **Every step can be switched off** (`--skip STEP`, or `steps:` in the config); `--skip-inference`
+  analyses videos that already have pose and ROI files. A second run does not repeat finished work.
+- **A clip with a hidden maze corner** gets the consensus ROI of the other clips in its folder; check
+  the montage under `roi/roi_consensus_qc/`.
+- The mock batch is drawn at 16 px/cm, so the gait step prints its "below 20 px/cm" warning.
+
 ## Quick Start
 
 ### Try it on the mock data (no videos, models or GPU needed)

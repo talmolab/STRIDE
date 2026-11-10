@@ -76,7 +76,7 @@ class PipelineConfig:
     @classmethod
     def from_json(cls, path: Path) -> "PipelineConfig":
         """Load configuration from JSON file."""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls(**data)
 
@@ -86,7 +86,7 @@ class PipelineConfig:
             k: str(v) if isinstance(v, Path) else v
             for k, v in self.__dict__.items()
         }
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def ensure_output_dirs(self) -> None:
@@ -185,7 +185,8 @@ STRICT_REQUIRED_23 = [
     "segment4.top_left", "segment4.bottom_left", "segment4.centroid",
 ]
 
-# Relaxed version: skip segment1 (20 nodes)
+# Relaxed version: skip segment1 (20 nodes). Kept for reference only: the frame selector
+# (stride.stages.roi_selection) accepts strict-23 or ALL 16 corners, never a missing corner.
 RELAXED_REQUIRED_20 = [
     "arm_right.top_left", "arm_right.top_right", "arm_right.centroid",
     "junction.top_left", "junction.top_right", "junction.bottom_left",
@@ -234,7 +235,7 @@ def calculate_px_per_cm(roi_yaml_path: Path) -> dict:
     import yaml
     import numpy as np
 
-    with open(roi_yaml_path) as f:
+    with open(roi_yaml_path, encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
 
     # Find arm_right polygon

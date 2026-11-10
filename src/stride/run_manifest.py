@@ -270,7 +270,7 @@ def write_run_manifest(
         out.mkdir(parents=True, exist_ok=True)
         manifest = collect_manifest(stage=stage, **kwargs)
         path = out / (filename or f"{stage}_run_manifest.yaml")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             yaml.safe_dump(manifest, f, sort_keys=False, default_flow_style=False)
         return path
     except Exception as exc:  # best-effort: never break a completed run...
