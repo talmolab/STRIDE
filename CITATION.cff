@@ -8,9 +8,35 @@ type: software
 authors:
   - family-names: Li
     given-names: Yipeng
-    # TODO(before submission): confirm corresponding email + affiliation (ORCID if available).
 license: MIT
-version: "0.1.0"
+version: "1.0.0"
 repository-code: "https://github.com/talmolab/STRIDE"
-# TODO(before submission): add `doi:` (Zenodo software DOI) and cut a matching release tag,
-# then bump `version` above and pyproject.toml to that tag.
+url: "https://talmolab.github.io/STRIDE-docs/"
+# A software DOI will be added here (`doi:`) when the release is archived.
+preferred-citation:
+  type: unpublished
+  title: "Dual cognitive and motor phenotyping for early detection of Alzheimer's Disease progression in mouse models"
+  status: preprint
+  notes: "In preparation."
+  year: 2026
+  authors:
+    - family-names: Li
+      given-names: Yipeng
+    - family-names: Ling
+      given-names: L.
+    - family-names: Chou
+      given-names: R.
+    - family-names: Ketterer-Sykes
+      given-names: E. B.
+    - family-names: Andrews
+      given-names: N. A.
+    - family-names: Han
+      given-names: C.
+    - family-names: Liao
+      given-names: C.
+    - family-names: Lee
+      given-names: C. T.
+    - family-names: Lee
+      given-names: K. F.
+    - family-names: Pereira
+      given-names: Talmo D.

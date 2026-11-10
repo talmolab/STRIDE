@@ -63,8 +63,8 @@ PLAN.md         this file
 | 1 | Core fixes: launching, file discovery, stage chaining, honest exits, run manifests and warnings, snout fix, mock test set | merged 2026-11-10 (PR #9) |
 | 2 | ChArUco calibration (`stride calibrate`) + `stride tmaze` (any file name, optional metadata, decision-rules step, ROI best-instance + consensus fallback, config-then-CLI, step switches) | merged 2026-11-10 (PR #10) |
 | 3 | `stride gait` (start from a folder of videos + pose files, px/cm without ROI, keypoint-name mapping, orientation warning) | merged 2026-11-10 (PR #11) |
-| 4 | `lab/` (`stride-lab`): sort, whiteboard check, rename, per-day scale check, then the public T-maze pipeline with the lab's models; checked by reproducing two real cohorts end to end | built and checked on branch `step4-lab` (2026-11-10); not yet proposed as a PR |
-| 5 | Release: v1.0.0 version bump and tag, docs site, README restructure, CI on three operating systems, repository hygiene (lab paths out of config.yaml / RUNBOOK.md / docstrings), model and example-data deposit, software DOI, visibility switch | not started |
+| 4 | `lab/` (`stride-lab`): sort, whiteboard check, rename, per-day scale check, then the public T-maze pipeline with the lab's models; checked by reproducing two real cohorts end to end | merged 2026-11-10 (PR #12) |
+| 5 | Release: version 1.0.0, README rewrite, repository hygiene (lab configuration, internal runbook and internal paths removed), CHANGELOG, CI on three operating systems; then the tag, the docs site, model and example-data deposit, software DOI, visibility switch | in progress: version, README, hygiene, CHANGELOG and CI workflow done; tag, docs site, deposits and visibility switch open |
 
 Step 2 notes.
 - GPU launch checked on a 24-frame real clip: pose and ROI ran on the requested GPU for `cuda:0` and `cuda:1`.
@@ -98,6 +98,8 @@ Step 4 notes (STRIDE Lab, design agreed 2026-11-10).
   (accept the day with its own value, accept it with the cohort value, or exclude it). The cohort value is compared
   with the previous cohort on the same rig as a warning only. The maze position per day (from the ROI files) is a
   second, report-only check. All levels are config values.
+- The cohort value is the median over the days measured so far, so it can move (by about 0.01 px/cm) as days
+  arrive; the cohort's gait tables are then recomputed.
 - This closes the open point of step 2 ("pins its recorded values or names its clips"): neither; the lab pipeline
   measures every day. An explicit `calibration.px_per_cm` remains possible (used to reproduce an earlier cohort).
 - The two decisions a person makes: the whiteboard sign-off, and a recording day flagged by the scale check.
@@ -158,21 +160,11 @@ with no reward row is scored as not correct in the existing entry points.
 - **TUI** for the CLI (e.g. a guided screen that fills the config, shows per-step status and runs it). After the CLI
   and config schema are stable.
 - **Docs site**: pages for T-maze, Gait, calibration, config reference, outputs glossary, troubleshooting, lab workflow.
-- **CI**: pytest on Linux, macOS and Windows for every PR.
+- **CI**: `.github/workflows/tests.yml` runs pytest on Linux, macOS and Windows for every PR; watch its first runs
+  (nothing had been executed on Windows or macOS before it).
 - **Production logic still outside the package after step 2** (if any): list here when step 2 reports.
-- **Release hygiene**: generic example config only; lab config, RUNBOOK and internal paths moved out; decide whether
-  the public history is squashed; author e-mail in `pyproject.toml`.
+- **Release hygiene** (done in the working tree for 1.0.0): one generic config (`config.example.yaml`), the lab's
+  configuration and internal runbook removed, internal paths removed from comments. Still to decide: whether the
+  public history is squashed (removed files remain in the history), and a contact address for the author.
 - **Models and data**: deposit the trained pose and ROI models with their training-library versions, plus a small
   example clip, and add the DOIs to the README.
-
-## 8. Working copies and pointers (lab machine; remove this section before the repository goes public)
-
-- `/home/exx/leo-local/STRIDE` — branch `next`. Untracked working reports kept out of git:
-  `CHANGES_NEXT.md`, `tests/mock/BASELINE_REPORT.md`, `tests/mock/AFTER_FIX_REPORT.md`.
-- `/home/exx/leo-local/STRIDE-tmaze` — branch `step2-tmaze` (from `next`): `stride tmaze`.
-- `/home/exx/leo-local/STRIDE-step2` — branch `step2-rename-calib` (from `main`, new files only): calibration + lab intake.
-- `/home/exx/vast/leo/stride` — the copy the lab's production runs import. Never edit it during a run; it is two
-  commits behind `main` and carries the snout fix as an uncommitted edit. Point production at a released tag once
-  v1.0.0 exists.
-- Lab-side records: `Tmaze-core/EVENTS.md` (entries of 2026-11-09), the to-do list `stride-public-release`,
-  `2026-06-15-T-maze-analysis/output/snoutfix_rerun/` and `output/rotation_fix_comparison/`.

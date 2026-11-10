@@ -1,5 +1,7 @@
 # Scale calibration — px/cm from a ChArUco board
 
+> Part of the STRIDE documentation: [docs index](README.md) · [documentation site](https://talmolab.github.io/STRIDE-docs/) · [project page](https://talmolab.github.io/STRIDE-page/)
+
 Gait distances are reported in centimetres, so STRIDE needs to know how many pixels one centimetre is in your
 recordings. `stride calibrate` measures it from a ChArUco board lying in view of the camera and writes one value for
 the recording set-up.
