@@ -1,15 +1,20 @@
 """
-Command-line interface for the T-maze pipeline.
+Command-line interface for STRIDE.
 
 Usage:
-    stride run --input /path/to/videos --output /path/to/results
+    stride run --input /path/to/videos --output /path/to/results --meta meta.csv \
+               --pose-model <centroid> --pose-model <centered_instance> \
+               --roi-model <centroid> --roi-model <centered_instance>
     stride check-distortion --input /path/to/videos
-    stride pose-inference --input /path/to/videos
-    stride roi-inference --input /path/to/videos
-    stride convert-roi --input /path/to/slp --output /path/to/yml
+    stride pose-inference --input /path/to/videos --model <centroid> --model <centered_instance>
+    stride roi-inference --input /path/to/videos --output /path/to/roi_slp --model ... --model ...
+    stride convert-roi --input /path/to/roi_slp --output /path/to/roi_yml
     stride analyze-decisions --videos /path/to/videos --yml /path/to/roi_yml --meta /path/to/meta.csv
-    stride analyze-gait --input /path/to/data
-    stride status
+    stride analyze-gait --input gait_per_stride.csv
+    stride status --output /path/to/results
+
+Videos are searched recursively (per-day subfolders) and case-insensitively (.mp4 / .MP4).
+A command that fails exits with a non-zero code and prints the reason.
 """
 
 import click
@@ -32,30 +37,47 @@ def main(ctx):
     ctx.ensure_object(dict)
 
 
+def _fail(message: str, code: int = 1):
+    """Print the reason and exit non-zero."""
+    console.print(f"[bold red]ERROR:[/] {message}", soft_wrap=True)
+    raise SystemExit(code)
+
+
 @main.command()
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing input videos")
+              help="Directory containing input videos (searched recursively)")
 @click.option("--output", "-o", "output_dir", type=click.Path(), default="./tmaze_output",
               help="Output directory for results")
 @click.option("--meta", "-m", "meta_csv", type=click.Path(exists=True),
               help="Metadata CSV with day,mouse,reward columns")
+@click.option("--pose-model", "pose_models", type=click.Path(exists=True), multiple=True,
+              help="Pose model path; give twice (centroid, centered-instance). Needed unless --skip-pose")
+@click.option("--roi-model", "roi_models", type=click.Path(exists=True), multiple=True,
+              help="ROI model path; give twice (centroid, centered-instance). Needed unless --skip-roi")
+@click.option("--yml", "-y", "yml_dir", type=click.Path(exists=True), default=None,
+              help="Existing ROI .yml folder to use with --skip-roi (default: <output>/roi_yml, "
+                   "then ROI files next to the videos)")
 @click.option("--workers", "-w", "n_workers", type=int, default=4,
               help="Number of parallel workers")
 @click.option("--skip-distortion", is_flag=True, help="Skip distortion check")
 @click.option("--skip-pose", is_flag=True, help="Skip pose inference (use existing .slp)")
-@click.option("--skip-roi", is_flag=True, help="Skip ROI inference (use existing ROI .slp)")
+@click.option("--skip-roi", is_flag=True, help="Skip ROI inference (use existing ROI files)")
 @click.option("--batch-size", type=int, default=16, help="Batch size for inference")
 @click.option("--device", type=str, default="cuda", help="Device for inference (cuda, cuda:0, cpu)")
 @click.pass_context
-def run(ctx, input_dir, output_dir, meta_csv, n_workers, skip_distortion, skip_pose, skip_roi, batch_size, device):
-    """Run the full T-maze analysis pipeline."""
-    from stride.stages import (
-        check_distortion_batch,
-        run_pose_inference_batch,
-        run_roi_inference_batch,
-        convert_batch,
-        run_decision_analysis,
-    )
+def run(ctx, input_dir, output_dir, meta_csv, pose_models, roi_models, yml_dir, n_workers,
+        skip_distortion, skip_pose, skip_roi, batch_size, device):
+    """Run the pipeline on one folder: distortion check, pose + ROI inference, decisions.
+
+    Inference needs the trained SLEAP models (--pose-model / --roi-model, each given twice) and
+    the sleap-nn runtime. With --skip-pose --skip-roi it analyses existing pose and ROI files.
+    For the gait stages and the statistics use `python run_all.py --config <config>`.
+    """
+    from stride.stages.distortion_check import check_distortion_batch
+    from stride.stages.pose_inference import run_pose_inference_batch
+    from stride.stages.roi_inference import run_roi_inference_batch
+    from stride.stages.slp_to_yaml import convert_batch
+    from stride.stages.decision_analysis import run_decision_analysis
     from stride.utils.parallel import find_videos
 
     config = PipelineConfig(
@@ -64,22 +86,31 @@ def run(ctx, input_dir, output_dir, meta_csv, n_workers, skip_distortion, skip_p
         meta_csv=Path(meta_csv) if meta_csv else None,
         n_workers=n_workers,
     )
+
+    # Say what is missing before anything runs
+    if not skip_pose and not pose_models:
+        _fail("pose inference needs the trained pose model: pass --pose-model <centroid> "
+              "--pose-model <centered_instance>, or --skip-pose to use existing <video name>.slp files", 2)
+    if not skip_roi and not roi_models:
+        _fail("ROI inference needs the trained ROI model: pass --roi-model <centroid> "
+              "--roi-model <centered_instance>, or --skip-roi to use existing ROI files", 2)
+
     config.ensure_output_dirs()
 
-    console.print(f"[bold green]T-maze Pipeline v{__version__}[/]")
+    console.print(f"[bold green]STRIDE v{__version__}[/]")
     console.print(f"Input: {config.video_dir}")
     console.print(f"Output: {config.output_dir}")
     console.print(f"Workers: {config.n_workers}")
     console.print()
+    problems: list[str] = []
 
     # Stage 1: Scan videos
     console.print("[bold cyan]Stage 1: Scanning videos...[/]")
-    videos = find_videos(config.video_dir, pattern="*.mp4")
+    videos = find_videos(config.video_dir, extensions=(".mp4",))
     console.print(f"  Found {len(videos)} videos")
 
     if len(videos) == 0:
-        console.print("[red]No videos found. Exiting.[/]")
-        return
+        _fail(f"no .mp4 videos found under {config.video_dir} (searched recursively, any letter case)")
 
     # Stage 2: Distortion check (optional)
     if not skip_distortion:
@@ -90,90 +121,114 @@ def run(ctx, input_dir, output_dir, meta_csv, n_workers, skip_distortion, skip_p
             output_file=config.output_dir / "distortion_check.csv",
         )
         needs_undistort = sum(1 for r in distortion_results if r.get("needs_undistortion"))
-        console.print(f"  {needs_undistort}/{len(distortion_results)} videos may need undistortion")
+        no_board = sum(1 for r in distortion_results if r.get("needs_undistortion") is None)
+        console.print(f"  {needs_undistort}/{len(distortion_results)} videos may need undistortion"
+                      + (f" ({no_board} without a ChArUco board in view: not assessed)" if no_board else ""))
     else:
         console.print("\n[bold yellow]Stage 2: Skipped distortion check[/]")
 
     # Stage 3: Pose inference
     if not skip_pose:
         console.print("\n[bold cyan]Stage 3: Running pose inference...[/]")
-        pose_results = run_pose_inference_batch(
-            video_dir=config.video_dir,
-            output_dir=None,  # Co-locate with videos
-            overwrite=False,
-            batch_size=batch_size,
-            device=device,
-        )
+        try:
+            pose_results = run_pose_inference_batch(
+                video_dir=config.video_dir,
+                output_dir=None,  # Co-locate with videos
+                model_paths=list(pose_models),
+                overwrite=False,
+                batch_size=batch_size,
+                device=device,
+            )
+        except (ValueError, RuntimeError) as exc:
+            _fail(str(exc))
         console.print(f"  Done: {pose_results['done']}, Skipped: {pose_results['skipped']}, Failed: {pose_results['failed']}")
+        if pose_results["failed"]:
+            problems.append(f"pose inference failed for {pose_results['failed']} video(s)")
     else:
         console.print("\n[bold yellow]Stage 3: Skipped pose inference[/]")
 
     # Stage 4: ROI inference
+    roi_yml_dir = config.output_dir / "roi_yml"
     if not skip_roi:
         console.print("\n[bold cyan]Stage 4: Running ROI inference...[/]")
-        roi_results = run_roi_inference_batch(
-            video_dir=config.video_dir,
-            output_dir=config.output_dir / "roi_slp",
-            n_workers=1,  # GPU inference single-threaded
+        try:
+            roi_results = run_roi_inference_batch(
+                video_dir=config.video_dir,
+                output_dir=config.output_dir / "roi_slp",
+                model_paths=list(roi_models),
+                overwrite=False,
+                device=device,
+            )
+        except (ValueError, RuntimeError) as exc:
+            _fail(str(exc))
+        console.print(f"  Passed: {roi_results['passed']}, Skipped: {roi_results['skipped']}, Failed: {roi_results['failed']}")
+        if roi_results["failed"]:
+            problems.append(f"ROI inference failed for {roi_results['failed']} video(s)")
+
+        # Stage 5: SLP to YAML conversion
+        console.print("\n[bold cyan]Stage 5: Converting ROI SLP to YAML...[/]")
+        convert_results = convert_batch(
+            slp_dir=config.output_dir / "roi_slp",
+            yml_dir=roi_yml_dir,
             overwrite=False,
         )
-        console.print(f"  Passed: {roi_results['passed']}, Skipped: {roi_results['skipped']}, Failed: {roi_results['failed']}")
+        console.print(f"  Converted: {convert_results['ok']}, Skipped: {convert_results['skip']}, Failed: {convert_results['failed']}")
+        if convert_results["failed"] or convert_results.get("missing_keypoints"):
+            problems.append(f"ROI conversion failed for "
+                            f"{convert_results['failed'] + convert_results.get('missing_keypoints', 0)} file(s)")
     else:
-        console.print("\n[bold yellow]Stage 4: Skipped ROI inference[/]")
-
-    # Stage 5: SLP to YAML conversion
-    console.print("\n[bold cyan]Stage 5: Converting ROI SLP to YAML...[/]")
-    convert_results = convert_batch(
-        slp_dir=config.output_dir / "roi_slp",
-        yml_dir=config.output_dir / "roi_yml",
-        overwrite=False,
-    )
-    console.print(f"  Converted: {convert_results['ok']}, Skipped: {convert_results['skip']}, Failed: {convert_results['failed']}")
+        console.print("\n[bold yellow]Stage 4-5: Skipped ROI inference and conversion[/]")
+        if yml_dir:
+            roi_yml_dir = Path(yml_dir)
 
     # Stage 6: Decision analysis
+    decisions_dir = config.output_dir / "decisions"
     if config.meta_csv and config.meta_csv.exists():
         console.print("\n[bold cyan]Stage 6: Analyzing T-maze decisions...[/]")
+        has_yml = roi_yml_dir.exists() and any(roi_yml_dir.glob("*.yml"))
         decision_results = run_decision_analysis(
             video_dir=config.video_dir,
-            yml_dir=config.output_dir / "roi_yml",
+            yml_dir=roi_yml_dir if has_yml else None,   # None: ROI files next to the videos
             meta_csv=config.meta_csv,
-            output_csv=config.output_dir / "decisions" / "decisions.csv",
+            output_dir=decisions_dir,
             n_workers=config.n_workers,
         )
         console.print(f"  Analyzed: {decision_results['ok']}/{decision_results['total']} trials")
+        if decision_results["ok"] == 0:
+            problems.append("no video could be analysed for decisions (see the summary above)")
     else:
-        console.print("\n[bold yellow]Stage 6: Skipped decision analysis (no metadata CSV)[/]")
+        console.print("\n[bold yellow]Stage 6: Skipped decision analysis (no metadata CSV; pass --meta)[/]")
 
     # Provenance sidecar: record how this run was produced (code, models, params, env).
-    try:
-        from stride.stages.pose_inference import DEFAULT_POSE_MODELS
-        from stride.stages.roi_inference import DEFAULT_ROI_MODELS
-        _models = [*DEFAULT_POSE_MODELS, *DEFAULT_ROI_MODELS]
-    except Exception:
-        _models = None
     manifest_path = write_run_manifest(
         config.output_dir, "pipeline",
-        models=_models,
+        models=[*pose_models, *roi_models] or None,
         params={"n_workers": n_workers, "batch_size": batch_size, "device": device,
                 "skip_distortion": skip_distortion, "skip_pose": skip_pose, "skip_roi": skip_roi},
         inputs={"video_dir": config.video_dir, "meta_csv": config.meta_csv, "n_videos": len(videos)},
-        outputs=[config.output_dir / "decisions" / "decisions.csv",
+        outputs=[decisions_dir / "decisions.csv",
                  config.output_dir / "distortion_check.csv"],
+        results={"problems": problems or None},
     )
 
-    console.print("\n[bold green]Pipeline complete![/]")
-    console.print(f"Results saved to: {config.output_dir}")
     if manifest_path:
         console.print(f"Run manifest: {manifest_path}")
+    if problems:
+        console.print("\n[bold red]Pipeline finished with problems:[/]")
+        for pr in problems:
+            console.print(f"  - {pr}")
+        raise SystemExit(1)
+    console.print("\n[bold green]Pipeline complete![/]")
+    console.print(f"Results saved to: {config.output_dir}")
 
 
 @main.command("pose-inference")
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing videos")
+              help="Directory containing videos (searched recursively, .mp4 / .MP4)")
 @click.option("--output", "-o", "output_dir", type=click.Path(), default=None,
               help="Output directory for .slp files (default: same as video)")
 @click.option("--model", "-m", "model_paths", type=click.Path(exists=True), multiple=True,
-              help="Model paths (centroid and centered_instance)")
+              help="Model path; give twice (centroid and centered_instance). Required")
 @click.option("--batch-size", "-b", type=int, default=16,
               help="Batch size for inference")
 @click.option("--device", "-d", type=str, default="cuda",
@@ -192,10 +247,10 @@ def pose_inference(ctx, input_dir, output_dir, model_paths, batch_size, device, 
     For multi-GPU parallelism, run multiple instances with different worker IDs:
 
         # Terminal 1 - GPU 0
-        tmaze pose-inference -i /videos --gpu 0 --worker-id 0 --num-workers 2
+        stride pose-inference -i /videos -m <centroid> -m <centered_instance> --gpu 0 --worker-id 0 --num-workers 2
 
         # Terminal 2 - GPU 1
-        tmaze pose-inference -i /videos --gpu 1 --worker-id 1 --num-workers 2
+        stride pose-inference -i /videos -m <centroid> -m <centered_instance> --gpu 1 --worker-id 1 --num-workers 2
     """
     from stride.stages.pose_inference import run_pose_inference_batch
 
@@ -212,39 +267,47 @@ def pose_inference(ctx, input_dir, output_dir, model_paths, batch_size, device, 
         console.print(f"Worker: {worker_id + 1}/{num_workers}")
 
     model_paths = list(model_paths) if model_paths else None
-    results = run_pose_inference_batch(
-        video_dir=Path(input_dir),
-        output_dir=Path(output_dir) if output_dir else None,
-        model_paths=model_paths,
-        overwrite=overwrite,
-        batch_size=batch_size,
-        device=device,
-        worker_id=worker_id,
-        num_workers=num_workers,
-    )
+    try:
+        results = run_pose_inference_batch(
+            video_dir=Path(input_dir),
+            output_dir=Path(output_dir) if output_dir else None,
+            model_paths=model_paths,
+            overwrite=overwrite,
+            batch_size=batch_size,
+            device=device,
+            worker_id=worker_id,
+            num_workers=num_workers,
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc))
 
     console.print(f"\n[green]Done: {results['done']}/{results['total']} videos[/]")
     console.print(f"Skipped: {results['skipped']}")
     if results['failed'] > 0:
         console.print(f"[red]Failed: {results['failed']} videos[/]")
+        for d in [d for d in results["details"] if d.get("status") not in ("ok", "skip")][:5]:
+            console.print(f"  {d.get('video')}: {d.get('error') or d.get('reason')}", soft_wrap=True)
 
     # Provenance sidecar (worker 0 only, to avoid multi-GPU write races).
     if worker_id == 0:
-        from stride.stages.pose_inference import DEFAULT_POSE_MODELS
-        _models = model_paths or [str(p) for p in DEFAULT_POSE_MODELS]
         mpath = write_run_manifest(
             Path(output_dir) if output_dir else Path(input_dir), "pose_inference",
-            models=_models,
+            models=model_paths,
             params={"batch_size": batch_size, "device": device, "num_workers": num_workers, "overwrite": overwrite},
             inputs={"video_dir": input_dir}, results=results,
         )
         if mpath:
             console.print(f"Run manifest: {mpath}")
 
+    if results["total_all"] == 0:
+        _fail(f"no .mp4 videos found under {input_dir} (searched recursively, any letter case)")
+    if results["failed"] > 0:
+        raise SystemExit(1)
+
 
 @main.command("check-distortion")
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing videos or single video file")
+              help="Directory containing videos (searched recursively) or single video file")
 @click.option("--output", "-o", "output_file", type=click.Path(), default=None,
               help="Output file for results (CSV/JSON)")
 @click.option("--num-frames", "-n", type=int, default=10,
@@ -267,6 +330,9 @@ def check_distortion(ctx, input_dir, output_file, num_frames, squares_x, squares
         output_file=Path(output_file) if output_file else None,
     )
 
+    if not results:
+        _fail(f"no .mp4 / .avi videos found under {input_path} (searched recursively, any letter case)")
+
     # Display summary
     table = Table(title="Distortion Check Results")
     table.add_column("Video", style="cyan")
@@ -279,6 +345,8 @@ def check_distortion(ctx, input_dir, output_file, num_frames, squares_x, squares
         status = "[red]UNDISTORT[/]" if r.get("needs_undistortion") else "[green]OK[/]"
         if r.get("needs_undistortion") is None:
             status = "[yellow]NO BOARD[/]"
+        if r.get("error"):
+            status = "[red]ERROR[/]"
         table.add_row(
             r.get("video", "?"),
             f"{r.get('line_straightness', 0):.2f}",
@@ -288,17 +356,26 @@ def check_distortion(ctx, input_dir, output_file, num_frames, squares_x, squares
         )
 
     console.print(table)
+    errors = [r for r in results if r.get("error")]
+    for r in errors[:5]:
+        console.print(f"[red]{r.get('video')}: {r.get('error')}[/]", soft_wrap=True)
+    n_no_board = sum(1 for r in results if r.get("needs_undistortion") is None and not r.get("error"))
+    if n_no_board:
+        console.print(f"{n_no_board}/{len(results)} video(s) show no ChArUco board in the sampled frames: "
+                      f"distortion could not be assessed for them.")
+    if errors:
+        raise SystemExit(1)
 
 
 @main.command("roi-inference")
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing videos")
+              help="Directory containing videos (searched recursively, .mp4 / .MP4)")
 @click.option("--output", "-o", "output_dir", type=click.Path(), required=True,
               help="Output directory for ROI .slp files")
 @click.option("--model", "-m", "model_paths", type=click.Path(exists=True), multiple=True,
-              help="Model paths (centroid and centered_instance)")
-@click.option("--device", "-d", type=str, default="cuda",
-              help="Device for inference (cuda, cuda:0, cuda:1, cpu)")
+              help="Model path; give twice (centroid and centered_instance). Required")
+@click.option("--device", "-d", type=str, default=None,
+              help="Device for inference (cuda, cuda:0, cuda:1, cpu). Default: chosen by sleap-nn")
 @click.option("--gpu", "-g", type=int, default=None,
               help="GPU device ID (shorthand for --device cuda:N)")
 @click.option("--worker-id", type=int, default=0,
@@ -313,10 +390,10 @@ def roi_inference(ctx, input_dir, output_dir, model_paths, device, gpu, worker_i
     For multi-GPU parallelism, run multiple instances with different worker IDs:
 
         # Terminal 1 - GPU 0
-        tmaze roi-inference -i /videos -o /output --gpu 0 --worker-id 0 --num-workers 2
+        stride roi-inference -i /videos -o /output -m <centroid> -m <centered_instance> --gpu 0 --worker-id 0 --num-workers 2
 
         # Terminal 2 - GPU 1
-        tmaze roi-inference -i /videos -o /output --gpu 1 --worker-id 1 --num-workers 2
+        stride roi-inference -i /videos -o /output -m <centroid> -m <centered_instance> --gpu 1 --worker-id 1 --num-workers 2
     """
     from stride.stages.roi_inference import run_roi_inference_batch
 
@@ -327,36 +404,46 @@ def roi_inference(ctx, input_dir, output_dir, model_paths, device, gpu, worker_i
     console.print(f"[bold]Running ROI inference[/]")
     console.print(f"Input: {input_dir}")
     console.print(f"Output: {output_dir}")
-    console.print(f"Device: {device}")
+    console.print(f"Device: {device or 'auto (chosen by sleap-nn)'}")
     if num_workers > 1:
         console.print(f"Worker: {worker_id + 1}/{num_workers}")
 
     model_paths = list(model_paths) if model_paths else None
-    results = run_roi_inference_batch(
-        video_dir=Path(input_dir),
-        output_dir=Path(output_dir),
-        model_paths=model_paths,
-        overwrite=overwrite,
-        worker_id=worker_id,
-        num_workers=num_workers,
-    )
+    try:
+        results = run_roi_inference_batch(
+            video_dir=Path(input_dir),
+            output_dir=Path(output_dir),
+            model_paths=model_paths,
+            overwrite=overwrite,
+            worker_id=worker_id,
+            num_workers=num_workers,
+            device=device,
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc))
 
     console.print(f"[green]Completed: {results['passed']}/{results['total']} videos[/]")
     if results['failed'] > 0:
         console.print(f"[red]Failed: {results['failed']} videos[/]")
+        for d in [d for d in results["results"] if d.get("status") not in ("ok", "skip")][:5]:
+            console.print(f"  {d.get('video')}: {d.get('error') or d.get('reason')}", soft_wrap=True)
 
     # Provenance sidecar (worker 0 only, to avoid multi-GPU write races).
     if worker_id == 0:
-        from stride.stages.roi_inference import DEFAULT_ROI_MODELS
-        _models = model_paths or [str(p) for p in DEFAULT_ROI_MODELS]
         mpath = write_run_manifest(
             Path(output_dir), "roi_inference",
-            models=_models,
-            params={"device": device, "num_workers": num_workers, "overwrite": overwrite},
+            models=model_paths,
+            params={"device": device or "auto (chosen by sleap-nn)", "num_workers": num_workers,
+                    "overwrite": overwrite},
             inputs={"video_dir": input_dir}, results=results,
         )
         if mpath:
             console.print(f"Run manifest: {mpath}")
+
+    if results["total_all"] == 0:
+        _fail(f"no .mp4 videos found under {input_dir} (searched recursively, any letter case)")
+    if results["failed"] > 0:
+        raise SystemExit(1)
 
 
 @main.command("convert-roi")
@@ -393,47 +480,62 @@ def convert_roi(ctx, input_dir, output_dir, overwrite):
     if mpath:
         console.print(f"Run manifest: {mpath}")
 
+    if results["total"] == 0:
+        _fail(f"no ROI prediction files (*.preds.v2.best1.slp / *.best1.slp) found in {input_dir}")
+    if results["failed"] > 0 or results["missing_keypoints"] > 0:
+        console.print(f"[red]{results['failed'] + results['missing_keypoints']} of {results['total']} ROI "
+                      f"file(s) were not converted (see above); those videos have no ROI yml.[/]")
+        raise SystemExit(1)
+
 
 @main.command("analyze-decisions")
 @click.option("--videos", "-v", "video_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing videos with .slp pose files")
-@click.option("--yml", "-y", "yml_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing ROI .yml files")
+              help="Directory containing videos with pose files next to them (searched recursively)")
+@click.option("--yml", "-y", "yml_dir", type=click.Path(exists=True), default=None,
+              help="Directory containing ROI .yml files (omit when the ROI files sit next to the videos)")
 @click.option("--meta", "-m", "meta_csv", type=click.Path(exists=True), required=True,
               help="Metadata CSV with day,mouse,reward columns")
-@click.option("--output", "-o", "output_csv", type=click.Path(), default="decisions.csv",
-              help="Output CSV file")
+@click.option("--output", "-o", "output_dir", type=click.Path(), default="decisions",
+              help="Output directory for decisions.csv, events.csv, metrics.csv (default: ./decisions)")
+@click.option("--pose-suffix", "pose_slp_suffix", type=str, default=".slp",
+              help="Suffix of the pose file next to each video (default: .slp)")
 @click.option("--workers", "-w", "n_workers", type=int, default=4,
               help="Number of parallel workers")
 @click.pass_context
-def analyze_decisions(ctx, video_dir, yml_dir, meta_csv, output_csv, n_workers):
-    """Analyze T-maze arm entry decisions."""
+def analyze_decisions(ctx, video_dir, yml_dir, meta_csv, output_dir, pose_slp_suffix, n_workers):
+    """Analyze T-maze arm entry decisions.
+
+    Writes decisions.csv, events.csv and metrics.csv (plus decisions_run_manifest.yaml) into the
+    output directory.
+    """
     from stride.stages.decision_analysis import run_decision_analysis
+
+    out = Path(output_dir)
+    if out.suffix.lower() == ".csv":      # `-o something/decisions.csv`: use its folder
+        console.print(f"[yellow]--output is a directory; using {out.parent} (files: decisions.csv, "
+                      f"events.csv, metrics.csv)[/]")
+        out = out.parent
 
     console.print(f"[bold]Analyzing T-maze decisions[/]")
     console.print(f"Videos: {video_dir}")
-    console.print(f"ROI YMLs: {yml_dir}")
+    console.print(f"ROI YMLs: {yml_dir or '(next to the videos)'}")
     console.print(f"Metadata: {meta_csv}")
 
     results = run_decision_analysis(
         video_dir=Path(video_dir),
-        yml_dir=Path(yml_dir),
+        yml_dir=Path(yml_dir) if yml_dir else None,
         meta_csv=Path(meta_csv),
-        output_csv=Path(output_csv),
+        output_dir=out,
         n_workers=n_workers,
+        pose_slp_suffix=pose_slp_suffix,
     )
 
     console.print(f"[green]Analyzed: {results['ok']}/{results['total']} trials[/]")
-    console.print(f"Output saved to: {output_csv}")
-
-    mpath = write_run_manifest(
-        Path(output_csv).parent, "decisions",
-        params={"n_workers": n_workers},
-        inputs={"video_dir": video_dir, "yml_dir": yml_dir, "meta_csv": meta_csv},
-        outputs=[output_csv], results=results,
-    )
-    if mpath:
-        console.print(f"Run manifest: {mpath}")
+    if results["ok"] == 0:
+        why = "; ".join(f"{n} x {r}" for r, n in (results.get("skip_reasons") or {}).items()) or "no videos found"
+        _fail(f"no video could be analysed ({why})")
+    console.print(f"Output saved to: {out}/ (decisions.csv, events.csv, metrics.csv)")
+    console.print(f"Run manifest: {out / 'decisions_run_manifest.yaml'}")
 
 
 @main.command("analyze-gait")
@@ -447,10 +549,15 @@ def analyze_decisions(ctx, video_dir, yml_dir, meta_csv, output_csv, n_workers):
               help="Confidence threshold (default: 0.3)")
 @click.pass_context
 def analyze_gait(ctx, input_csv, conf_csv, output_csv, threshold):
-    """Filter and analyze gait stride data."""
+    """Filter gait strides by keypoint confidence and remove edge strides.
+
+    This is the quick two-step filter. The pipeline's stage 6
+    (`python -m stride.stages.run_gait_extraction`) additionally applies the angular-velocity
+    and forward-direction filters from the config and therefore keeps fewer strides.
+    """
     from stride.stages.gait_filtering import filter_strides
 
-    console.print(f"[bold]Filtering gait strides[/]")
+    console.print(f"[bold]Filtering gait strides (confidence + edge strides only)[/]")
     console.print(f"Input: {input_csv}")
     console.print(f"Threshold: {threshold}")
 
@@ -464,10 +571,11 @@ def analyze_gait(ctx, input_csv, conf_csv, output_csv, threshold):
     console.print(f"[green]Original: {results['original']} strides[/]")
     console.print(f"[green]After filtering: {results['filtered']} strides[/]")
     console.print(f"Output saved to: {output_csv}")
+    console.print("Note: no angular-velocity / forward-direction filter here; stage 6 of the pipeline applies them.")
 
     mpath = write_run_manifest(
         Path(output_csv).parent, "gait_filtering",
-        params={"confidence_threshold": threshold},
+        params={"confidence_threshold": threshold, "filters": "confidence + edge strides"},
         inputs={"input_csv": input_csv, "confidence_csv": conf_csv},
         outputs=[output_csv], results=results,
     )
@@ -477,7 +585,7 @@ def analyze_gait(ctx, input_csv, conf_csv, output_csv, threshold):
 
 @main.command("count-frames")
 @click.option("--input", "-i", "input_dir", type=click.Path(exists=True), required=True,
-              help="Directory containing videos")
+              help="Directory containing videos (searched recursively, .mp4 / .MP4 / .avi)")
 @click.pass_context
 def count_frames(ctx, input_dir):
     """Count total frames across all videos in a directory."""
@@ -489,37 +597,69 @@ def count_frames(ctx, input_dir):
 
     console.print(f"[green]Videos: {n_videos}[/]")
     console.print(f"[green]Total frames: {total:,}[/]")
+    if n_videos == 0:
+        _fail(f"no .mp4 / .avi videos found under {input_dir} (searched recursively, any letter case)")
 
 
 @main.command("status")
-@click.option("--checkpoint", "-c", type=click.Path(), default="progress.log",
-              help="Checkpoint file to read")
+@click.option("--output", "-o", "output_dir", type=click.Path(), default=".",
+              help="Output directory of a run (default: current directory)")
+@click.option("--checkpoint", "-c", type=click.Path(), default=None,
+              help="(legacy) a progress.log checkpoint file to read")
 @click.pass_context
-def status(ctx, checkpoint):
-    """Show pipeline checkpoint status."""
-    from stride.utils.checkpoint import read_checkpoints
+def status(ctx, output_dir, checkpoint):
+    """Show what has been run under an output directory.
 
-    checkpoint_path = Path(checkpoint)
-    if not checkpoint_path.exists():
-        console.print(f"[yellow]No checkpoint file found at: {checkpoint}[/]")
+    Every stage writes a <stage>_run_manifest.yaml next to its outputs; this lists them
+    (stage, when, code version, result counts).
+    """
+    import yaml
+
+    if checkpoint:   # legacy file; nothing in STRIDE writes it
+        from stride.utils.checkpoint import read_checkpoints
+        checkpoint_path = Path(checkpoint)
+        if not checkpoint_path.exists():
+            console.print(f"[yellow]No checkpoint file at: {checkpoint}. STRIDE does not write progress.log; "
+                          f"use `stride status --output <run output dir>` to list the run manifests.[/]")
+            raise SystemExit(1)
+        table = Table(title="Pipeline Status (legacy checkpoint file)")
+        table.add_column("Stage", style="cyan")
+        table.add_column("Status", justify="center")
+        for name, state in read_checkpoints(checkpoint_path).items():
+            table.add_row(name, state)
+        console.print(table)
         return
 
-    checkpoints = read_checkpoints(checkpoint_path)
+    root = Path(output_dir)
+    manifests = sorted(root.rglob("*_run_manifest.yaml")) if root.exists() else []
+    if not manifests:
+        console.print(f"[yellow]No run manifests under {root}. Each stage writes "
+                      f"<stage>_run_manifest.yaml next to its outputs; run a stage first, or pass "
+                      f"--output <the --output folder of your run>.[/]")
+        raise SystemExit(1)
 
-    table = Table(title="Pipeline Status")
-    table.add_column("Stage", style="cyan")
-    table.add_column("Status", justify="center")
-
-    status_colors = {
-        "pending": "[yellow]PENDING[/]",
-        "running": "[blue]RUNNING[/]",
-        "completed": "[green]COMPLETED[/]",
-        "failed": "[red]FAILED[/]",
-    }
-
-    for name, status in checkpoints.items():
-        table.add_row(name, status_colors.get(status, status))
-
+    table = Table(title=f"STRIDE runs under {root}")
+    table.add_column("Stage", style="cyan", no_wrap=True)
+    table.add_column("When (UTC)", overflow="fold")
+    table.add_column("Code", overflow="fold")
+    table.add_column("Result", overflow="fold")
+    table.add_column("Manifest", overflow="fold")
+    rows = []
+    for m in manifests:
+        try:
+            d = yaml.safe_load(m.read_text()) or {}
+        except Exception as exc:
+            rows.append(("?", "", "", f"unreadable: {exc}", str(m.relative_to(root))))
+            continue
+        git = d.get("git") or {}
+        code = f"{d.get('stride_version', '?')} {git.get('commit_short', '')}{'+dirty' if git.get('dirty') else ''}".strip()
+        res = d.get("results") or {}
+        short = ", ".join(f"{k}={v}" for k, v in res.items()
+                          if isinstance(v, (int, float, str)) and not isinstance(v, bool))[:70]
+        when = str(d.get("timestamp_utc", ""))[:19].replace("T", " ")
+        rows.append((str(d.get("stage", "?")), when, code, short, str(m.relative_to(root))))
+    for r in sorted(rows, key=lambda r: r[1]):
+        table.add_row(*r)
     console.print(table)
 
 

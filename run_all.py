@@ -20,6 +20,9 @@ Usage (from the repo root):
     python run_all.py --stages 7-9         # only LMM
     python run_all.py --stages 3,7-9       # skip inference, run decisions + LMM
     python run_all.py --stages 1-2,3,4-6   # full from scratch through filtering
+
+Each stage reads what the previous one wrote under <output>/<batch>/ unless the batch config
+names an explicit path. A stage that fails stops the run with a non-zero exit code.
 """
 
 import argparse
@@ -56,7 +59,7 @@ STAGES = {
 
 
 def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
-              batch: str | None = None) -> bool:
+              batch: str | None = None, device: str | None = None) -> bool:
     """Run a single pipeline stage via subprocess."""
     script = stage_info["script"]
     name = stage_info["name"]
@@ -78,15 +81,17 @@ def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
     cmd = [sys.executable, str(script),
            "--config", str(Path(config).resolve()),
            "--output", str(Path(output).resolve())]
-    if batch and stage_key != "10":  # regression doesn't take --batch
+    if batch and stage_key != "10":  # the classifier pools all batches; every other stage takes --batch
         cmd.extend(["--batch", batch])
+    if device and stage_key == "1-2":  # inference device (stages 1-2 only)
+        cmd.extend(["--device", device])
 
     t0 = time.time()
     result = subprocess.run(cmd)  # inherit the caller's CWD
     elapsed = time.time() - t0
 
     if result.returncode != 0:
-        print(f"\n  FAILED (exit code {result.returncode}) after {elapsed:.1f}s")
+        print(f"\n  FAILED (exit code {result.returncode}) after {elapsed:.1f}s — the reason is printed above")
         return False
 
     print(f"\n  Completed in {elapsed:.1f}s")
@@ -101,8 +106,16 @@ def main():
                         help="Output directory (default: ./output, resolved from CWD)")
     parser.add_argument("--batch", default=None, help="Process only this batch key")
     parser.add_argument("--stages", default=None,
-                        help="Comma-separated stage ranges to run (e.g., '1-3,7-9'). Default: all")
+                        help="Comma-separated stage keys to run, from: 1-2, 3, 4-6, 7-9, 10 "
+                             "(e.g. '3,4-6,7-9'). Default: all")
+    parser.add_argument("--device", default=None,
+                        help="Inference device for stages 1-2 (cuda, cuda:0, cpu). Default: from the config, else cuda")
     args = parser.parse_args()
+
+    if not Path(args.config).exists():
+        print(f"ERROR: config file not found: {args.config}\n"
+              f"       Pass --config <your config.yaml> (start from config.example.yaml).")
+        sys.exit(2)
 
     print("=" * 60)
     print("T-MAZE AUTOMATED PIPELINE — FULL RUN")
@@ -128,7 +141,7 @@ def main():
     results = {}
 
     for sk in stage_keys:
-        ok = run_stage(sk, STAGES[sk], args.config, args.output, args.batch)
+        ok = run_stage(sk, STAGES[sk], args.config, args.output, args.batch, args.device)
         results[sk] = ok
         if not ok:
             print(f"\nStage {sk} failed. Stopping pipeline.")

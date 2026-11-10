@@ -15,10 +15,12 @@ Config-driven gait extraction pipeline (Stages 4-6).
 Stage 4-5: Keypoint preprocessing + stride detection (via gait_extraction.py)
 Stage 6:   Stride filtering (confidence, edge removal, angular velocity)
 
+Inputs per batch: an explicit `metrics_meta_csv` / `yml_dir` in the batch config wins; without
+them the stage reads what stage 3 wrote under <output>/<batch>/ (see stride.stages.batch_paths).
+
 Usage:
-    uv run python automated_pipeline/gait/run_gait_extraction.py
-    uv run python automated_pipeline/gait/run_gait_extraction.py --batch gopro_sept2025
-    uv run python automated_pipeline/gait/run_gait_extraction.py --config automated_pipeline/config.yaml
+    python -m stride.stages.run_gait_extraction --config config.yaml --output output
+    python -m stride.stages.run_gait_extraction --config config.yaml --output output --batch my_batch
 """
 
 import argparse
@@ -35,6 +37,10 @@ from stride.stages.gait_extraction import (
     DEFAULT_PARAMS,
     compute_keypoint_confidence,
     run_gait_extraction,
+)
+from stride.stages.batch_paths import (
+    StageError, batch_name, default_paths, load_config_or_exit, missing_message,
+    resolve_input, resolve_yml_dir, select_batches,
 )
 
 
@@ -83,6 +89,8 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
     df = pd.read_csv(stride_csv)
     n_before = len(df)
     print(f"    Loaded {n_before:,} strides")
+    counts = {"loaded": int(n_before)}          # for the run manifest (reporting only)
+    stem_pos = list(df.columns).index("stem") if "stem" in df.columns else None
 
     # Step 1: Confidence filtering
     if confidence_csv.exists():
@@ -111,6 +119,8 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
                 n_low = int((~(df["mean_confidence"] > conf_threshold)).sum())
                 df = df[df["mean_confidence"] > conf_threshold].copy()
                 print(f"    Confidence filter (>{conf_threshold}): removed {n_low:,} strides")
+                counts["removed_confidence"] = n_low
+                counts["no_confidence_entry"] = n_unmatched
                 df.drop(columns=["mean_confidence"], inplace=True, errors="ignore")
     else:
         print(f"    No confidence CSV found — skipping confidence filter")
@@ -123,8 +133,18 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
         df = df.groupby("stem").apply(
             lambda g: g.iloc[1:-1] if len(g) > 2 else g.iloc[0:0],
             include_groups=False,
-        ).reset_index(drop=True)
+        )
+        # `include_groups=False` drops the grouping column; keep `stem` in the filtered file by
+        # putting it back at its original position (same rows, same order, same other columns).
+        if "stem" not in df.columns and stem_pos is not None:
+            stems = df.index.get_level_values(0) if df.index.nlevels > 1 else None
+            df = df.reset_index(drop=True)
+            if stems is not None and len(stems) == len(df):
+                df.insert(min(stem_pos, len(df.columns)), "stem", list(stems))
+        else:
+            df = df.reset_index(drop=True)
         print(f"    Edge removal: removed {n_before_edge - len(df):,} strides")
+        counts["removed_edge"] = int(n_before_edge - len(df))
 
     # Step 3: Angular velocity filtering
     ang_col = "angular_velocity_deg_s_mean"
@@ -132,6 +152,7 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
         n_before_ang = len(df)
         df = df[(df[ang_col] >= ang_min) & (df[ang_col] <= ang_max)].copy()
         print(f"    Angular velocity [{ang_min}, {ang_max}] deg/s: removed {n_before_ang - len(df):,} strides")
+        counts["removed_angular_velocity"] = int(n_before_ang - len(df))
 
     # Step 4: Forward direction filtering
     # Backward strides (mice hesitating/reversing) have fundamentally different
@@ -151,16 +172,33 @@ def filter_strides(stride_csv: Path, confidence_csv: Path, output_csv: Path,
             direction = "positive" if forward_sign > 0 else "negative"
             print(f"    Forward direction filter (stride_length_cm {direction}): "
                   f"removed {n_backward:,} backward strides ({100*n_backward/n_before_dir:.1f}%)")
+            counts["removed_backward"] = n_backward
+            counts["forward_sign"] = direction
 
     df.to_csv(output_csv, index=False)
     print(f"    Final: {len(df):,} strides → {output_csv.name}")
+    counts["final"] = int(len(df))
+
+    # Provenance sidecar (best-effort; never breaks a completed run)
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            Path(output_csv).parent, "gait_filtering",
+            params={"confidence_threshold": conf_threshold, "angular_velocity_min": ang_min,
+                    "angular_velocity_max": ang_max, "remove_edge_strides": remove_edges,
+                    "filter_forward_direction": filter_direction},
+            inputs={"stride_csv": stride_csv, "confidence_csv": confidence_csv},
+            outputs=[output_csv], results=counts,
+        )
+    except Exception:
+        pass
     return len(df)
 
 
 def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Path):
-    """Run Stages 4-6 for one batch."""
+    """Run Stages 4-6 for one batch. Raises StageError (with the reason) when it cannot run."""
     print(f"\n{'='*60}")
-    print(f"Batch: {batch_cfg['name']}")
+    print(f"Batch: {batch_name(batch_key, batch_cfg)}")
     print(f"{'='*60}")
 
     batch_out = output_dir / batch_key
@@ -179,15 +217,20 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
             return
         print(f"  Batch is finalized but no stride CSV found. Attempting extraction...")
 
-    # Check required fields
-    meta_csv = batch_cfg.get("metrics_meta_csv", "")
-    yml_dir = batch_cfg.get("yml_dir", "")
-    if not meta_csv or not Path(meta_csv).exists():
-        print(f"  ERROR: metrics_meta_csv not found: {meta_csv}")
-        return
-    if not yml_dir or not Path(yml_dir).exists():
-        print(f"  ERROR: yml_dir not found: {yml_dir}")
-        return
+    # Inputs: explicit config paths win; otherwise what stage 3 wrote under <output>/<batch>/
+    defaults = default_paths(output_dir, batch_key)
+    meta_path, source = resolve_input(batch_cfg, "metrics_meta_csv", defaults["metrics_meta_csv"])
+    if meta_path is None and defaults["metrics_csv"].exists():
+        meta_path, source = defaults["metrics_csv"], "previous stage (no metadata_csv: genotype / sex stay empty)"
+    if meta_path is None:
+        raise StageError(missing_message(
+            "The per-video table for gait (metrics_meta_csv)", batch_cfg, "metrics_meta_csv",
+            defaults["metrics_meta_csv"], "stage 3 (run_tmaze)"))
+    meta_csv = str(meta_path)
+    print(f"  Per-video table: {meta_csv}  [{source}]")
+    yml_path = resolve_yml_dir(batch_cfg, output_dir, batch_key)
+    print(f"  ROI files: {yml_path if yml_path is not None else 'next to the videos'}")
+    yml_dir = str(yml_path) if yml_path is not None else None
 
     # Build params
     params = build_params(config)
@@ -231,8 +274,10 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
 
     # Stage 6: Stride filtering
     if not stride_csv.exists():
-        print(f"  ERROR: No gait_per_stride.csv to filter")
-        return
+        raise StageError(
+            f"no strides were extracted for batch '{batch_key}', so there is nothing to filter "
+            f"(see the summary above: every video was skipped or failed; check `pose_slp_suffix`, "
+            f"the pose files next to the videos and the video paths in {meta_csv})")
 
     print(f"\n  Stage 6: Stride filtering...")
     filter_strides(stride_csv, conf_csv, filtered_csv, config)
@@ -240,12 +285,12 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
 
 def main():
     parser = argparse.ArgumentParser(description="Config-driven gait extraction (Stages 4-6)")
-    parser.add_argument("--config", default="automated_pipeline/config.yaml")
-    parser.add_argument("--output", default="automated_pipeline/output")
+    parser.add_argument("--config", default="config.yaml", help="Pipeline config (default: ./config.yaml)")
+    parser.add_argument("--output", default="output", help="Output directory (default: ./output)")
     parser.add_argument("--batch", default=None, help="Process only this batch key")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config_or_exit(args.config)
     output_dir = Path(args.output)
 
     print("=" * 60)
@@ -254,11 +299,19 @@ def main():
     print(f"Output: {output_dir}")
     print("=" * 60)
 
-    for batch_key, batch_cfg in config["batches"].items():
-        if args.batch and args.batch != batch_key:
-            continue
-        process_batch(batch_key, batch_cfg, config, output_dir)
+    failures = []
+    for batch_key, batch_cfg in select_batches(config, args.batch):
+        try:
+            process_batch(batch_key, batch_cfg, config, output_dir)
+        except StageError as exc:
+            print(f"  ERROR: {exc}")
+            failures.append(f"{batch_key}: {exc}")
 
+    if failures:
+        print(f"\nStage 4-6 FAILED for {len(failures)} batch(es):")
+        for f in failures:
+            print(f"  - {f}")
+        raise SystemExit(1)
     print("\nDone.")
 
 

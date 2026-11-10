@@ -353,10 +353,9 @@ def check_distortion_batch(
     Returns:
         List of result dictionaries
     """
-    if input_path.is_file():
-        videos = [input_path]
-    else:
-        videos = list(input_path.glob("*.mp4")) + list(input_path.glob("*.avi"))
+    # Recursive, case-insensitive search (per-day subfolders, .mp4 / .MP4 / .avi)
+    from stride.utils.parallel import find_videos
+    videos = find_videos(Path(input_path), extensions=(".mp4", ".avi"))
 
     results = []
     for video_path in sorted(videos):

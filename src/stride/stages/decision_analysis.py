@@ -51,6 +51,7 @@ def run_decision_analysis(
     n_workers: int = 4,
     min_depth_px: int = MIN_DEPTH_PX,
     config: Optional[PipelineConfig] = None,
+    pose_slp_suffix: str = ".slp",
 ) -> dict:
     """
     Run T-maze decision analysis on all videos.
@@ -68,6 +69,8 @@ def run_decision_analysis(
         n_workers: Number of parallel workers (CPU-bound, can use many workers)
         min_depth_px: Minimum depth threshold for commit (default 50)
         config: Optional pipeline config for thresholds
+        pose_slp_suffix: Suffix of the pose file next to each video (default ".slp";
+            e.g. ".pose.v2.slp")
 
     Returns:
         Summary dict with counts
@@ -96,7 +99,11 @@ def run_decision_analysis(
         meta_map=meta_map,
         min_depth_px=min_depth_px,
         config=config,
+        pose_slp_suffix=pose_slp_suffix,
     )
+
+    # Metadata matching report (warnings only: scoring is unchanged)
+    _report_metadata_matching(videos, meta_df, meta_map, meta_csv)
 
     # Process videos in parallel (CPU-bound analysis)
     if n_workers > 1:
@@ -161,11 +168,120 @@ def run_decision_analysis(
         metrics_df = build_metrics(events_df, decisions_df)
         metrics_df.to_csv(output_dir / "metrics.csv", index=False)
 
-    return {
+    summary = {
         "total": len(videos),
         "ok": len(events_rows),
         "skipped": len(videos) - len(events_rows),
     }
+
+    # End-of-stage summary: why videos were skipped (also when several workers were used)
+    skip_reasons, error_examples = _summarize_skips(results)
+    _print_stage_summary(video_dir, summary, skip_reasons, error_examples, pose_slp_suffix)
+    n_no_entry = sum(1 for d in decisions_rows if not d.get("ok", True))
+    if decisions_rows and n_no_entry > len(decisions_rows) / 2:
+        print(f"  WARNING: {n_no_entry} of {len(decisions_rows)} analysed videos have no arm entry (ok = False). "
+              f"If the mice did enter an arm, check the ROI files and the camera resolution: frames in which "
+              f"the body outline covers less than {MIN_BODY_AREA:g} px^2 are ignored, so a low-resolution "
+              f"recording can lose every frame.")
+    if n_no_entry:
+        summary["no_arm_entry"] = n_no_entry
+    if skip_reasons:
+        summary["skip_reasons"] = skip_reasons
+    if error_examples:
+        summary["errors"] = error_examples
+
+    # Provenance sidecar (best-effort; never breaks a completed run)
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            output_dir, "decisions",
+            params={"n_workers": n_workers, "min_depth_px": min_depth_px,
+                    "pose_slp_suffix": pose_slp_suffix},
+            inputs={"video_dir": video_dir, "yml_dir": yml_dir, "meta_csv": meta_csv,
+                    "n_videos": len(videos)},
+            outputs=[output_dir / "decisions.csv", output_dir / "events.csv",
+                     output_dir / "metrics.csv"],
+            results=summary,
+        )
+    except Exception:
+        pass
+
+    return summary
+
+
+_SKIP_LABELS = {
+    "skip_parse": "file name is not Day<N>_<mouse>_Trial<T>.mp4",
+    "skip_pose": "no pose file next to the video",
+    "skip_yml": "no ROI file found",
+}
+
+
+def _summarize_skips(results: list) -> tuple[dict, list]:
+    """Count the videos that produced no row, by reason; keep a few error messages."""
+    reasons: dict = {}
+    examples: list = []
+    for r in results:
+        status = str(r.get("status", "error"))
+        if status == "ok":
+            continue
+        if status.startswith("error"):
+            key = "error while analysing"
+            msg = status[len("error:"):].strip() if status.startswith("error:") else str(r.get("error", ""))
+            if len(examples) < 20:
+                examples.append(f"{r.get('video', r.get('item', '?'))}: {msg}")
+        else:
+            key = _SKIP_LABELS.get(status, status)
+        reasons[key] = reasons.get(key, 0) + 1
+    return reasons, examples
+
+
+def _print_stage_summary(video_dir, summary: dict, skip_reasons: dict, error_examples: list,
+                         pose_slp_suffix: str) -> None:
+    print(f"Decision analysis summary: {summary['total']} videos found under {video_dir}, "
+          f"{summary['ok']} analysed, {summary['skipped']} skipped")
+    for reason, n in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+        extra = f" (looked for <video name>{pose_slp_suffix})" if reason.startswith("no pose file") else ""
+        print(f"  skipped {n}: {reason}{extra}")
+    for e in error_examples[:5]:
+        print(f"    ERROR {e}")
+    if len(error_examples) > 5:
+        print(f"    ... and {len(error_examples) - 5} more errors")
+    if summary["total"] and summary["ok"] == 0:
+        print("  WARNING: no video was analysed, so no decisions.csv / events.csv / metrics.csv was written")
+
+
+def _report_metadata_matching(videos: list, meta_df, meta_map: dict, meta_csv) -> None:
+    """Warn about videos without a reward row and metadata rows without a video.
+
+    Reporting only: how a trial is scored is not changed here (a video whose (day, mouse) has
+    no reward row is still written with an empty reward, as before).
+    """
+    try:
+        video_keys = {}
+        for v in videos:
+            key = parse_filename(v)
+            if key is not None:
+                video_keys.setdefault((key["day"], key["mouse"]), 0)
+                video_keys[(key["day"], key["mouse"])] += 1
+        if not video_keys:
+            return
+        no_reward = sorted(k for k in video_keys if meta_map.get(k, "") not in ("L", "R"))
+        unused = sorted(k for k in meta_map if k not in video_keys)
+        if no_reward:
+            n_vid = sum(video_keys[k] for k in no_reward)
+            shown = ", ".join(f"{d}/{m}" for d, m in no_reward[:8]) + (" ..." if len(no_reward) > 8 else "")
+            print(f"WARNING: {n_vid} video(s) of {len(no_reward)} (day, mouse) pair(s) have no L/R reward row in "
+                  f"{Path(meta_csv).name}: {shown}. Their reward is left empty and the trials are written "
+                  f"as not correct (correct_bin = 0) - add the rows or exclude these trials downstream.")
+        if unused:
+            shown = ", ".join(f"{d}/{m}" for d, m in unused[:8]) + (" ..." if len(unused) > 8 else "")
+            print(f"WARNING: {len(unused)} (day, mouse) row(s) in {Path(meta_csv).name} match no video: {shown}")
+        odd_days = sorted({str(d) for d in meta_df["day"].unique() if not re.fullmatch(r"DAY\d+", str(d))})
+        if odd_days:
+            print(f"WARNING: metadata day value(s) {odd_days[:6]} are not written like 'Day1' / 'DAY1'; "
+                  f"days are matched as text against the video names (Day<N>_...), so these rows match nothing.")
+    except Exception as exc:  # reporting must never stop the stage
+        print(f"(metadata matching report skipped: {type(exc).__name__}: {exc})")
 
 
 def process_single_video(
@@ -174,6 +290,7 @@ def process_single_video(
     meta_map: dict,
     min_depth_px: int,
     config: PipelineConfig,
+    pose_slp_suffix: str = ".slp",
 ) -> dict:
     """Process a single video for decision analysis with depth-based commit."""
     # Parse filename
@@ -182,7 +299,7 @@ def process_single_video(
         return {"status": "skip_parse", "video": video_path.name}
 
     # Check for required files
-    pose_path = video_path.with_suffix(".slp")
+    pose_path = video_path.with_suffix(pose_slp_suffix)
     yml_path = resolve_roi_yml(video_path, yml_dir)
 
     if not pose_path.exists():
@@ -231,7 +348,7 @@ def process_single_video(
         return {"status": "ok", "events": events, "decisions": decisions}
 
     except Exception as e:
-        return {"status": f"error:{e}", "video": video_path.name}
+        return {"status": f"error:{type(e).__name__}: {e}", "video": video_path.name}
 
 
 def load_analysis_data(video_path, pose_path, yml_path, config):
@@ -256,8 +373,9 @@ def load_analysis_data(video_path, pose_path, yml_path, config):
     }
     roi_names = sorted(roi_polys.keys())
 
-    # Load poses
-    labels = sio.load_file(str(pose_path))
+    # Load poses (falls back to the on-disk video when the .slp embeds an unreadable video path)
+    from stride.utils.pose_io import load_pose_labels
+    labels = load_pose_labels(pose_path, video_path)
     video = labels.videos[0]
     fps = read_fps(video_path, labels_video=video, default=config.fps_default)
 
@@ -277,10 +395,14 @@ def load_analysis_data(video_path, pose_path, yml_path, config):
     for j in range(pts.shape[1]):
         pts[:, j, :] = interpolate_gaps(pts[:, j, :], max_gap=7)
 
-    # Get snout index for storing snout coordinates (needed by count_snout_probes)
-    snout_idx = None
+    # Column of the snout inside the gap-filled array `pts` (needed by count_snout_probes).
+    # The snout stored in the coverage table is taken from `pts`, i.e. after interpolate_gaps
+    # (max_gap=7), like the body keypoints. Reading the raw track instead leaves NaN on every
+    # frame where the snout is not tracked, and a short tracking dropout then splits one probe
+    # episode into several (probes_L/R inflated, probe_frames_L/R deflated).
+    snout_col = None
     if "snout" in labels.skeleton.node_names:
-        snout_idx = labels.skeleton.index("snout")
+        snout_col = sel.index(labels.skeleton.index("snout"))
 
     # Compute coverage
     rows = []
@@ -289,10 +411,10 @@ def load_analysis_data(video_path, pose_path, yml_path, config):
 
         row = {"frame": t}
 
-        # Store snout coordinates (for geometric probe detection)
-        if snout_idx is not None and np.all(np.isfinite(trx[t, snout_idx])):
-            row["snout_x"] = float(trx[t, snout_idx, 0])
-            row["snout_y"] = float(trx[t, snout_idx, 1])
+        # Store snout coordinates (for geometric probe detection): gap-filled, see above
+        if snout_col is not None and np.all(np.isfinite(pts[t, snout_col])):
+            row["snout_x"] = float(pts[t, snout_col, 0])
+            row["snout_y"] = float(pts[t, snout_col, 1])
         else:
             row["snout_x"] = np.nan
             row["snout_y"] = np.nan

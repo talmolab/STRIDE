@@ -18,8 +18,12 @@ Approach (matching manuscript _shared.py):
   - Features ranked by p-value, classifiers evaluated at K=1..N
   - Logistic regression with 5-fold stratified CV, balanced class weights
 
+Inputs: an explicit `stride_csv` / `decisions_csv` in each batch wins; without them the stage
+reads what stages 3-6 wrote under <output>/<batch>/ (see stride.stages.batch_paths). The method
+(feature list, ranking, cross-validation) is unchanged.
+
 Usage:
-    uv run python automated_pipeline/regression/run_regression.py
+    python -m stride.stages.classification --config config.yaml --output output
 """
 
 import argparse
@@ -38,6 +42,10 @@ from sklearn.metrics import roc_curve, auc
 from sklearn.model_selection import StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+from stride.stages.batch_paths import (
+    StageError, batch_name, default_paths, load_config_or_exit, resolve_input,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -79,6 +87,20 @@ ALL_FEATURES_DEF = {f["col"]: f for f in TMAZE_FEATURES + GAIT_FEATURES}
 # ============================================================================
 
 def _standardize_mouse_id(df, id_cols, sep):
+    # Tables written by this pipeline already carry the mouse id / genotype under their
+    # canonical names; use them when the batch's `mouse_id_cols` are not in the table.
+    if id_cols is None or any(c not in df.columns for c in id_cols):
+        for col in ("MouseID", "mouse_id", "mouse"):
+            if col in df.columns:
+                df["MouseID"] = df[col].astype(str)
+                break
+        else:
+            raise StageError(f"no mouse id column found (looked for {id_cols}, MouseID, mouse_id, mouse)")
+        if "Genotype" not in df.columns and "genotype" in df.columns:
+            df["Genotype"] = df["genotype"]
+        return df
+    if "Genotype" not in df.columns and "genotype" in df.columns:
+        df["Genotype"] = df["genotype"]
     if len(id_cols) == 1:
         df["MouseID"] = df[id_cols[0]].astype(str)
     else:
@@ -108,13 +130,19 @@ def _derive_tmaze_columns(df, fps):
     return df
 
 
-def load_per_mouse_features(config: dict) -> pd.DataFrame:
+def _id_cols(batch_cfg: dict):
+    cols = batch_cfg.get("mouse_id_cols") or (batch_cfg.get("column_map") or {}).get("mouse_id")
+    return [cols] if isinstance(cols, str) else cols
+
+
+def load_per_mouse_features(config: dict, output_dir: Path | None = None) -> pd.DataFrame:
     """Load per-mouse feature matrix.
 
     If classification.merged_data_csv exists in config, load directly.
-    Otherwise, build from raw stride + T-maze data.
+    Otherwise, build from raw stride + T-maze data (explicit batch paths, else the files the
+    earlier stages wrote under <output>/<batch>/).
     """
-    class_cfg = config.get("classification", {})
+    class_cfg = config.get("classification", {}) or {}
     merged_path = class_cfg.get("merged_data_csv")
 
     if merged_path and Path(merged_path).exists():
@@ -134,13 +162,19 @@ def load_per_mouse_features(config: dict) -> pd.DataFrame:
     # Gait: each mouse from its own batch
     all_gait = []
     for batch_key, batch_cfg in config["batches"].items():
-        stride_path = batch_cfg["stride_csv"]
-        if not Path(stride_path).exists():
+        default = default_paths(output_dir, batch_key)["stride_csv"] if output_dir is not None else None
+        stride_path, _ = resolve_input(batch_cfg, "stride_csv", default)
+        if stride_path is None:
+            print(f"  Gait ({batch_key}): no filtered stride file "
+                  f"(`stride_csv`{f' or {default}' if default is not None else ''}) - batch left out")
             continue
         print(f"  Gait ({batch_key}): {Path(stride_path).name}")
         gait = pd.read_csv(stride_path, low_memory=False)
-        gait = _standardize_mouse_id(gait, batch_cfg["mouse_id_cols"],
+        gait = _standardize_mouse_id(gait, _id_cols(batch_cfg),
                                       batch_cfg.get("mouse_id_sep", "_"))
+        if "Genotype" not in gait.columns:
+            raise StageError(f"{stride_path} has no genotype column; the classifier needs WT and Tau labels "
+                             f"(give the batch a `metadata_csv` and re-run stages 3 and 4-6)")
         gait = gait[gait["Genotype"].isin(["WT", "Tau"])].dropna(subset=["Genotype"]).copy()
 
         # Speed filter: 15-25 cm/s (matching 01_exploratory_analysis.py)
@@ -155,20 +189,31 @@ def load_per_mouse_features(config: dict) -> pd.DataFrame:
         gait_cols = [f["col"] for f in GAIT_FEATURES if f["col"] in gait.columns]
         # Median aggregation (matching 01_exploratory_analysis.py)
         mouse = gait.groupby(["MouseID", "Genotype"])[gait_cols].median().reset_index()
-        mouse["Batch"] = batch_cfg["name"]
+        mouse["Batch"] = batch_name(batch_key, batch_cfg)
         all_gait.append(mouse)
         print(f"    {mouse['MouseID'].nunique()} mice")
+    if not all_gait:
+        raise StageError("no batch has a filtered stride file: run stages 3 and 4-6 first, or set "
+                         "`stride_csv` in the batches (or `classification.merged_data_csv`)")
     gait_all = pd.concat(all_gait, ignore_index=True)
 
     # T-maze: pool all batches
     all_tmaze_trials = []
     for batch_key, batch_cfg in config["batches"].items():
+        # Folder of the batch's decisions file first (as before); then, for outputs of this
+        # pipeline, the batch folder one level up (where stage 3 writes the learning cycles and
+        # metrics_meta.csv) and the decisions folder itself.
         tmaze_dir = Path(batch_cfg.get("decisions_csv", "")).parent
-        for candidate in [tmaze_dir / "learning_cycle_1.csv",
-                          tmaze_dir / "metrics_meta.csv", tmaze_dir / "metrics.csv"]:
+        search_dirs = [tmaze_dir]
+        if output_dir is not None:
+            bo = Path(output_dir) / batch_key
+            search_dirs += [d for d in (tmaze_dir.parent, bo, bo / "decisions") if d not in search_dirs]
+        candidates = [d / name for d in search_dirs
+                      for name in ("learning_cycle_1.csv", "metrics_meta.csv", "metrics.csv")]
+        for candidate in candidates:
             if candidate.exists():
                 df = pd.read_csv(candidate, low_memory=False)
-                df = _standardize_mouse_id(df, batch_cfg["mouse_id_cols"],
+                df = _standardize_mouse_id(df, _id_cols(batch_cfg),
                                             batch_cfg.get("mouse_id_sep", "_"))
                 if "Genotype" in df.columns:
                     df = df[df["Genotype"].isin(["WT", "Tau"])].copy()
@@ -177,6 +222,9 @@ def load_per_mouse_features(config: dict) -> pd.DataFrame:
                 print(f"  T-maze ({batch_key}): {candidate.name} ({len(df)} trials)")
                 break
 
+    if not all_tmaze_trials:
+        raise StageError("no T-maze table found for any batch (learning_cycle_1.csv / metrics_meta.csv / "
+                         "metrics.csv next to `decisions_csv` or under <output>/<batch>/): run stage 3 first")
     tmaze_all = pd.concat(all_tmaze_trials, ignore_index=True)
     # Per-mouse T-maze: percent_correct uses mean (proportion), rest use median
     tmaze_cols = [f["col"] for f in TMAZE_FEATURES if f["col"] in tmaze_all.columns]
@@ -380,13 +428,37 @@ def run_classification(data: pd.DataFrame, feature_df: pd.DataFrame, out_dir: Pa
 # MAIN
 # ============================================================================
 
+def _check_inputs(data: pd.DataFrame, feature_df: pd.DataFrame) -> None:
+    """Say clearly what the classifier is about to run on.
+
+    Nothing is imputed, dropped or re-ranked here: the method is unchanged. A run that cannot
+    work at all (one genotype missing, no feature) stops with the reason; everything else is a
+    WARNING and the run proceeds exactly as before.
+    """
+    n_wt, n_tau = int((data["Label"] == 0).sum()), int((data["Label"] == 1).sum())
+    if min(n_wt, n_tau) == 0:
+        raise StageError(f"the classifier compares WT with Tau mice; this run has {n_wt} WT and {n_tau} Tau")
+    if min(n_wt, n_tau) < 5:
+        print(f"  WARNING: only {min(n_wt, n_tau)} mice in the smaller genotype group ({n_wt} WT, {n_tau} Tau); "
+              f"5-fold stratified cross-validation needs at least 5 per group, so the AUC values are not reliable.")
+    feats = feature_df["feature"].tolist() if len(feature_df) else []
+    if not feats:
+        raise StageError("no usable feature: each feature needs a value for more than 5 mice")
+    nan = {f: int(data[f].isna().sum()) for f in feats if data[f].isna().any()}
+    if nan:
+        print("  WARNING: feature value(s) are missing for some mice and the classifier does not impute; fits "
+              "that include these features fail and their AUC is written as NaN: "
+              + ", ".join(f"{f} ({n} mice)" for f, n in nan.items())
+              + ". Check that mouse ids match between the stride file and the T-maze tables.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="WT vs Tau logistic regression (Figure 7)")
-    parser.add_argument("--config", default="automated_pipeline/config.yaml")
-    parser.add_argument("--output", default="automated_pipeline/output")
+    parser.add_argument("--config", default="config.yaml", help="Pipeline config (default: ./config.yaml)")
+    parser.add_argument("--output", default="output", help="Output directory (default: ./output)")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config_or_exit(args.config)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -394,10 +466,38 @@ def main():
     print("Regression Pipeline — WT vs Tau Classification")
     print("=" * 60)
 
-    data = load_per_mouse_features(config)
-    feature_df = rank_features(data, config)
-    feature_df.to_csv(out_dir / "regression_feature_ranking.csv", index=False)
-    run_classification(data, feature_df, out_dir, config)
+    try:
+        data = load_per_mouse_features(config, out_dir)
+        if len(data) == 0:
+            raise StageError("no WT or Tau mouse in the feature table (the classifier needs mice labelled "
+                             "WT and Tau in the genotype column)")
+        try:
+            feature_df = rank_features(data, config)
+        except KeyError:               # no feature has enough values: the ranking table is empty
+            feature_df = pd.DataFrame(columns=["feature"])
+        _check_inputs(data, feature_df)
+        feature_df.to_csv(out_dir / "regression_feature_ranking.csv", index=False)
+        try:
+            run_classification(data, feature_df, out_dir, config)
+        except ValueError as exc:      # scikit-learn's own refusal (e.g. NaN inputs, one class in a fold)
+            raise StageError(f"the classifier could not be fitted: {exc}")
+    except StageError as exc:
+        print(f"\nStage 10 FAILED: {exc}")
+        raise SystemExit(1)
+
+    # Provenance sidecar (best-effort; never breaks a completed run)
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            out_dir, "classification",
+            params={"classification": config.get("classification")},
+            inputs={"n_mice": int(len(data)), "n_wt": int((data["Label"] == 0).sum()),
+                    "n_tau": int((data["Label"] == 1).sum()), "features": feature_df["feature"].tolist()},
+            outputs=[out_dir / "regression_feature_ranking.csv", out_dir / "regression_auc_vs_k.csv",
+                     out_dir / "regression_roc_curves.png", out_dir / "regression_auc_vs_k.png"],
+        )
+    except Exception:
+        pass
 
     print("\nDone.")
 

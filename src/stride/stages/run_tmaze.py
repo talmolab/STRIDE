@@ -22,8 +22,8 @@ PROVENANCE:
   Metadata enrichment: extracted from same notebook, cell 1 (~10 lines)
 
 Usage:
-    uv run python automated_pipeline/tmaze/run_tmaze.py
-    uv run python automated_pipeline/tmaze/run_tmaze.py --batch gopro_sept2025
+    python -m stride.stages.run_tmaze --config config.yaml --output output
+    python -m stride.stages.run_tmaze --config config.yaml --output output --batch my_batch
 """
 
 import argparse
@@ -37,6 +37,11 @@ import yaml
 warnings.filterwarnings("ignore")
 
 
+from stride.stages.batch_paths import (
+    StageError, batch_name, load_config_or_exit, resolve_yml_dir, select_batches,
+)
+
+
 def load_config(config_path: str) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
@@ -46,31 +51,33 @@ def load_config(config_path: str) -> dict:
 # STAGE 3: Decision analysis (via tmaze-pipeline package)
 # ============================================================================
 
-def run_decisions(batch_cfg: dict, output_dir: Path) -> dict[str, Path]:
+def run_decisions(batch_cfg: dict, output_dir: Path, yml_dir: Path | None = None) -> dict[str, Path]:
     """Run decision analysis for a non-finalized batch.
 
+    `yml_dir` None means the ROI files sit next to the videos.
     Returns dict with paths to decisions.csv, events.csv, metrics.csv.
+    Raises StageError (with the reason) when an input is missing or no video could be analysed.
     """
     from stride.stages.decision_analysis import run_decision_analysis
     from stride.config import PipelineConfig
 
+    for key in ("video_dir", "meta_trials_csv"):
+        if not batch_cfg.get(key):
+            raise StageError(f"the batch has no `{key}` (required for stage 3)")
     video_dir = Path(batch_cfg["video_dir"])
-    yml_dir = Path(batch_cfg["yml_dir"])
     meta_csv = Path(batch_cfg["meta_trials_csv"])
 
     if not video_dir.exists():
-        raise FileNotFoundError(f"video_dir not found: {video_dir}")
-    if not yml_dir.exists():
-        raise FileNotFoundError(f"yml_dir not found: {yml_dir}")
+        raise StageError(f"video_dir not found: {video_dir} (edit the batch in your config)")
     if not meta_csv.exists():
-        raise FileNotFoundError(f"meta_trials_csv not found: {meta_csv}")
+        raise StageError(f"meta_trials_csv not found: {meta_csv}")
 
     decisions_dir = output_dir / "decisions"
     decisions_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"  Running decision analysis...")
     print(f"    Videos: {video_dir}")
-    print(f"    ROI YAMLs: {yml_dir}")
+    print(f"    ROI YAMLs: {yml_dir if yml_dir is not None else 'next to the videos'}")
     print(f"    Meta: {meta_csv}")
 
     result = run_decision_analysis(
@@ -79,9 +86,13 @@ def run_decisions(batch_cfg: dict, output_dir: Path) -> dict[str, Path]:
         meta_csv=meta_csv,
         output_dir=decisions_dir,
         n_workers=4,
+        pose_slp_suffix=batch_cfg.get("pose_slp_suffix", ".slp"),
     )
 
     print(f"  Decision analysis: {result.get('ok', 0)} ok, {result.get('skipped', 0)} skipped")
+    if result.get("ok", 0) == 0:
+        why = "; ".join(f"{n} x {r}" for r, n in (result.get("skip_reasons") or {}).items()) or "no videos found"
+        raise StageError(f"no video could be analysed in {video_dir} ({why})")
 
     return {
         "decisions_csv": decisions_dir / "decisions.csv",
@@ -251,7 +262,7 @@ def split_learning_cycles(metrics_csv: Path, output_dir: Path,
 def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Path):
     """Process one batch: decisions → metadata enrichment → learning cycle split."""
     print(f"\n{'='*60}")
-    print(f"Batch: {batch_cfg['name']}")
+    print(f"Batch: {batch_name(batch_key, batch_cfg)}")
     print(f"{'='*60}")
 
     batch_out = output_dir / batch_key
@@ -270,7 +281,11 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
             print(f"    events.csv: {len(events)} event rows")
     else:
         print(f"  Stage 3: Running decision analysis...")
-        paths = run_decisions(batch_cfg, batch_out)
+        video_dir = batch_cfg.get("video_dir")
+        if not video_dir or not Path(video_dir).exists():
+            raise StageError(f"video_dir not found: {video_dir!r}. Edit the batch in your config "
+                             f"(config.example.yaml is a template; config.yaml holds the paper's own cohorts).")
+        paths = run_decisions(batch_cfg, batch_out, resolve_yml_dir(batch_cfg, output_dir, batch_key))
         decisions_path = str(paths["decisions_csv"])
         events_path = str(paths["events_csv"])
 
@@ -323,6 +338,22 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
     else:
         print(f"\n  Stage 3c: No enriched metrics available. Skipping learning cycle split.")
 
+    # Provenance sidecar for the stage-3 outputs of this batch (best-effort)
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            batch_out, "tmaze",
+            inputs={"video_dir": batch_cfg.get("video_dir"), "yml_dir": batch_cfg.get("yml_dir"),
+                    "meta_trials_csv": batch_cfg.get("meta_trials_csv"),
+                    "metadata_csv": batch_cfg.get("metadata_csv"),
+                    "finalized": bool(batch_cfg.get("finalized", False))},
+            params={"pose_slp_suffix": batch_cfg.get("pose_slp_suffix", ".slp"), "column_map": column_map},
+            outputs=[p for p in (decisions_path, events_path, batch_out / "metrics_meta.csv",
+                                 batch_out / "learning_cycle_1.csv", batch_out / "learning_cycle_2.csv") if p],
+        )
+    except Exception:
+        pass
+
     # Summary
     print(f"\n  Batch {batch_key} complete.")
     if decisions_path and Path(decisions_path).exists():
@@ -336,12 +367,12 @@ def process_batch(batch_key: str, batch_cfg: dict, config: dict, output_dir: Pat
 
 def main():
     parser = argparse.ArgumentParser(description="Config-driven T-maze behavioral analysis")
-    parser.add_argument("--config", default="automated_pipeline/config.yaml")
-    parser.add_argument("--output", default="automated_pipeline/output")
+    parser.add_argument("--config", default="config.yaml", help="Pipeline config (default: ./config.yaml)")
+    parser.add_argument("--output", default="output", help="Output directory (default: ./output)")
     parser.add_argument("--batch", default=None, help="Process only this batch key")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config_or_exit(args.config)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -350,11 +381,19 @@ def main():
     print(f"Config: {args.config}")
     print("=" * 60)
 
-    for batch_key, batch_cfg in config["batches"].items():
-        if args.batch and args.batch != batch_key:
-            continue
-        process_batch(batch_key, batch_cfg, config, out_dir)
+    failures = []
+    for batch_key, batch_cfg in select_batches(config, args.batch):
+        try:
+            process_batch(batch_key, batch_cfg, config, out_dir)
+        except StageError as exc:
+            print(f"  ERROR: {exc}")
+            failures.append(f"{batch_key}: {exc}")
 
+    if failures:
+        print(f"\nStage 3 FAILED for {len(failures)} batch(es):")
+        for f in failures:
+            print(f"  - {f}")
+        raise SystemExit(1)
     print("\nDone.")
 
 

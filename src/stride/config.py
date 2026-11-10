@@ -98,19 +98,80 @@ class PipelineConfig:
         (self.output_dir / "gait").mkdir(exist_ok=True)
 
 
-# Default model paths for the GoPro T-maze setup
-# ROI models detect 23 keypoints for T-maze regions (arm_right, junction, arm_left, segment1-4)
-DEFAULT_ROI_MODELS = [
-    Path("/root/vast/leo/2025-11-26-GoPro_roi_train/models/251126_191944.centroid.n=50"),
-    Path("/root/vast/leo/2025-11-26-GoPro_roi_train/models_centered_scale0.5/centered_instance.n=50"),
-]
+# Trained SLEAP models are NOT bundled with STRIDE and there are no built-in default paths:
+# give them explicitly (CLI: --model / --pose-model / --roi-model; config: pose_model_paths /
+# roi_model_paths in the batch). These names are kept (empty) for backward compatibility.
+#   ROI models detect 23 keypoints for the T-maze regions (arm_right, junction, arm_left, segment1-4)
+#   Pose models detect the 15 mouse body keypoints (snout, paws, tail, ...)
+DEFAULT_ROI_MODELS: list[Path] = []
+DEFAULT_POSE_MODELS: list[Path] = []
 
-# Pose models detect mouse body keypoints (snout, paws, tail, etc.)
-# Using n=503 models (latest, trained on 503 frames)
-DEFAULT_POSE_MODELS = [
-    Path("/root/vast/leo/2025-11-04-GoPro_Tmaze_train/models_500/251204_003259.centroid.n=503"),
-    Path("/root/vast/leo/2025-11-04-GoPro_Tmaze_train/models_500/centered_instance.n=503"),
-]
+
+def _exists(path) -> bool:
+    """``Path.exists()`` that returns False instead of raising on an unreadable path."""
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
+
+def resolve_model_paths(model_paths, kind: str) -> list[str]:
+    """Check the SLEAP model paths given for one inference stage.
+
+    Args:
+        model_paths: the paths given by the user (CLI option or batch config), or None
+        kind: "pose" or "ROI" (used in the messages)
+
+    Returns:
+        The paths as strings.
+
+    Raises:
+        ValueError: no model was given, or a given path does not exist. The message names the
+            option and the config key to set.
+    """
+    opt = "--model"
+    key = "pose_model_paths" if kind == "pose" else "roi_model_paths"
+    paths = [str(p) for p in (model_paths or [])]
+    if not paths:
+        raise ValueError(
+            f"No {kind} model given. STRIDE ships no models: pass the trained SLEAP {kind} model "
+            f"folders with {opt} <centroid model> {opt} <centered-instance model> "
+            f"(stride run: --{'pose' if kind == 'pose' else 'roi'}-model), or set `{key}` in the "
+            f"batch of your config file."
+        )
+    missing = [p for p in paths if not _exists(p)]
+    if missing:
+        raise ValueError(f"{kind} model path not found: {', '.join(missing)}")
+    return paths
+
+
+def require_sleap_nn() -> None:
+    """Raise a clear error when the SLEAP inference runtime is not installed."""
+    import importlib.util
+
+    if importlib.util.find_spec("sleap_nn") is None:
+        raise RuntimeError(
+            "sleap-nn is not installed in this Python environment. SLEAP inference (stages 1-2: "
+            "pose and ROI) needs the sleap-nn runtime (PyTorch); install it per "
+            "https://github.com/talmolab/sleap-nn, or run inference in your SLEAP environment. "
+            "The analysis stages (3-10) do not need it."
+        )
+
+
+def check_device(device: Optional[str]) -> None:
+    """Raise a clear error when a CUDA device is requested but no GPU is visible."""
+    if not device or not str(device).startswith("cuda"):
+        return
+    try:
+        import torch
+    except Exception:
+        return  # sleap-nn will report its own error
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"device '{device}' was requested but no CUDA GPU is visible to PyTorch. Run on a "
+            f"machine with a GPU, or pass --device cpu (slow) / set `device: cpu` in the config."
+        )
+
 
 # 23 required keypoints for horizontal T-maze ROI
 STRICT_REQUIRED_23 = [

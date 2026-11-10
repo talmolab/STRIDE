@@ -23,6 +23,7 @@ Gate ledger:
 Checks:
     python -m stride.stages.safety_checks --gait g.csv --expect-pxcm 26.15 --strict
     python -m stride.stages.safety_checks --roi-coverage $VID --expect-count 128
+    python -m stride.stages.safety_checks --roi-coverage $VID --yml-dir $OUT/roi_yml
 """
 from __future__ import annotations
 import argparse, csv, json, sys
@@ -96,8 +97,9 @@ def check_calibration(rows, expect_pxcm=None) -> list[Finding]:
                 f"(> {PXCM_TOL*100:.0f}%) — override/segment2 disagrees with the checkerboard"))
     elif spread < 1.02:
         f.append(Finding("WARN", "calibration",
-            "px/cm is a single pinned constant but no --expect-pxcm given: a uniform-but-WRONG override "
-            "cannot be caught. Pass the board-verified value from calibration_manifest to verify it."))
+            f"px/cm is the same for every stride (~{med:.2f}: a pinned override, or identical ROI files) "
+            "and no --expect-pxcm was given: a uniform-but-WRONG value cannot be caught. Pass the "
+            "board-verified px/cm with --expect-pxcm to verify it."))
     if not f:
         f.append(Finding("OK", "calibration", f"px/cm uniform ~{med:.1f}"
                          + (f", matches board {expect_pxcm:.2f}" if expect_pxcm else "")))
@@ -137,7 +139,14 @@ def check_fps(rows) -> list[Finding]:
     return [Finding("OK", "fps", f"uniform fps {uniq[0] if uniq else '?'}")]
 
 
-def check_roi_coverage(video_dir, expect_count=None) -> list[Finding]:
+def check_roi_coverage(video_dir, expect_count=None, yml_dir=None) -> list[Finding]:
+    """Every video must have an ROI file where the analysis stages look for one.
+
+    Accepted (the same search the stages use, `decision_analysis.resolve_roi_yml`): in `yml_dir`
+    when given, then next to the video, under any of the names
+    <stem>.preds.v2.best1.yml (stage 2c output), <stem>.rois.yml, <stem>.yml.
+    """
+    from stride.stages.decision_analysis import resolve_roi_yml
     d = Path(video_dir)
     mp4 = sorted([p for p in d.rglob("*.MP4")] + [p for p in d.rglob("*.mp4")])
     if not mp4:
@@ -145,11 +154,13 @@ def check_roi_coverage(video_dir, expect_count=None) -> list[Finding]:
     if expect_count is not None and len(mp4) != expect_count:
         return [Finding("FAIL", "roi_coverage",
             f"found {len(mp4)} videos but expected {expect_count} (Step-0 count mismatch)")]
-    miss = [p.name for p in mp4 if not p.with_suffix("").with_suffix(".rois.yml").exists()]
+    miss = [p.name for p in mp4 if resolve_roi_yml(p, Path(yml_dir) if yml_dir else None) is None]
+    where = f"in {yml_dir} or next to the video" if yml_dir else "next to the video (pass --yml-dir for a separate ROI folder)"
     if miss:
         return [Finding("FAIL", "roi_coverage",
-            f"{len(miss)}/{len(mp4)} videos have NO .rois.yml (e.g. {miss[:3]}) — run propagate_roi.py")]
-    return [Finding("OK", "roi_coverage", f"all {len(mp4)} videos have a .rois.yml")]
+            f"{len(miss)}/{len(mp4)} videos have NO ROI file {where} (e.g. {miss[:3]}) — "
+            f"run ROI inference / the consensus-ROI fallback for them")]
+    return [Finding("OK", "roi_coverage", f"all {len(mp4)} videos have an ROI file")]
 
 
 # ---- gate ledger: enforce step ORDER ----
@@ -181,6 +192,8 @@ def main():
     ap.add_argument("--gait"); ap.add_argument("--roi-coverage")
     ap.add_argument("--expect-pxcm", type=float, default=None)
     ap.add_argument("--expect-count", type=int, default=None)
+    ap.add_argument("--yml-dir", default=None,
+                    help="ROI yml folder for --roi-coverage when the ROI files are not next to the videos")
     ap.add_argument("--vid", help="video dir for the gate ledger (--stamp/--require)")
     ap.add_argument("--stamp", help="stamp this gate name as passed (needs --vid)")
     ap.add_argument("--require", help="comma-list of gate names that must already be stamped (needs --vid)")
@@ -189,9 +202,12 @@ def main():
     findings = []
     if a.require and a.vid: findings += require_gates(a.vid, [s.strip() for s in a.require.split(",")])
     if a.gait:
+        if not Path(a.gait).is_file():
+            print(f"  ✗ FAIL  [input] gait CSV not found: {a.gait}")
+            sys.exit(2)
         rows = list(csv.DictReader(open(a.gait)))
         findings += check_calibration(rows, a.expect_pxcm) + check_body_length(rows) + check_fps(rows)
-    if a.roi_coverage: findings += check_roi_coverage(a.roi_coverage, a.expect_count)
+    if a.roi_coverage: findings += check_roi_coverage(a.roi_coverage, a.expect_count, a.yml_dir)
     code = report(findings) if findings else 0
     if a.stamp and a.vid and code != 2:
         stamp_gate(a.vid, a.stamp)

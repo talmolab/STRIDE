@@ -1,0 +1,132 @@
+# ============================================================================
+# STRIDE — example configuration
+# ============================================================================
+# Copy this file, edit the `batches:` section for your recordings, and run
+#
+#     python run_all.py --config my_config.yaml --output output
+#
+# Every key below is read by the pipeline. The analysis settings further down
+# (stride detection, filtering, metrics, models, statistics) are the values used
+# in the STRIDE paper; change them only if you mean to change the analysis.
+#
+# A batch = one cohort recorded on one rig (one camera, one frame rate).
+# ============================================================================
+
+batches:
+  my_batch:                                  # batch key: used for --batch and as the output subfolder
+    name: "My batch"                         # label used in figures and tables
+
+    # --- what you provide ----------------------------------------------------
+    video_dir: "/path/to/videos/"            # searched recursively (per-day subfolders are fine); .mp4 / .MP4
+                                             # file names: Day<N>_<mouse>_Trial<T>.mp4  (e.g. Day3_1042_Trial5.mp4)
+    meta_trials_csv: "/path/to/meta_trials.csv"   # columns: day,mouse,reward   (day as Day1 / DAY1; reward L or R)
+    metadata_csv: "/path/to/metadata.csv"         # columns: Mouse,Gender,Genotype (one row per mouse)
+    fps: 120                                 # used only when the frame rate cannot be read from the video
+    column_map:
+      mouse_id: ["mouse"]                    # column(s) of the per-video table that make up the mouse id
+      mouse_id_sep: ""                       # separator when several columns are joined
+      sex: "Gender"                          # name of the sex column in metadata_csv
+
+    # --- optional -------------------------------------------------------------
+    # yml_dir: "/path/to/roi_yml/"           # ROI polygon files. Leave out when stage 2 writes them
+    #                                        # (<output>/<batch>/roi_yml/) or when they sit next to the
+    #                                        # videos as <video name>.rois.yml
+    # pose_slp_suffix: ".slp"                # pose file next to each video: <video name><suffix>
+    # px_per_cm_override: 26.4               # a calibration you measured (e.g. ChArUco board), used for every
+    #                                        # video instead of the per-video value derived from the ROI
+    # has_sex: true                          # add Sex as a covariate in the mixed models (needs F and M mice)
+    # finalized: true                        # never re-run inference / decisions for this batch; use the CSVs below
+
+    # SLEAP models for stages 1-2 (STRIDE ships none). Leave out to use existing pose / ROI files.
+    # pose_model_paths:
+    #   - "/path/to/pose_model/centroid"
+    #   - "/path/to/pose_model/centered_instance"
+    # roi_model_paths:
+    #   - "/path/to/roi_model/centroid"
+    #   - "/path/to/roi_model/centered_instance"
+    # device: "cuda:0"                       # inference device for this batch (cuda, cuda:0, cpu)
+
+    # Explicit inputs for the later stages. Normally NOT needed: each stage reads what the previous one
+    # wrote under <output>/<batch>/. Set them to analyse files produced elsewhere.
+    # decisions_csv: "/path/to/decisions.csv"
+    # events_csv: "/path/to/events.csv"
+    # metrics_meta_csv: "/path/to/metrics_meta.csv"
+    # stride_csv: "/path/to/gait_per_stride_filtered.csv"
+    # mouse_id_cols: ["mouse"]               # only for stride / T-maze tables that do not come from STRIDE
+    # mouse_id_sep: ""
+
+# --- Inference (stages 1-2), optional ---------------------------------------
+# inference:
+#   device: "cuda"            # default device for every batch (a batch-level `device` or --device wins)
+#   batch_size: 16
+
+# --- Gait extraction (stages 4-6) --------------------------------------------
+gait_extraction:
+  n_workers: 16                   # parallel worker processes for stride detection
+
+# --- Stride detection thresholds ----------------------------------------------
+stride_detection:
+  min_walk_velocity: 5.0        # cm/s — tail-base speed to count as walking
+  min_paw_velocity: 8.0         # cm/s — paw speed for swing candidacy
+  min_peak_paw_velocity: 15.0   # cm/s — peak paw speed to keep a swing
+  min_frames_swing: 3           # minimum swing duration, in FRAMES (the thresholds assume >= 100 fps)
+  smooth_median_window: 3       # median filter window, in frames
+  smooth_moving_avg_window: 5   # moving average window, in frames
+  phase_spline_k: 3             # spline order for phase interpolation
+  phase_grid_points: 101        # interpolation grid (0-100 % of the stride cycle)
+  maze_width_cm: 10.0           # physical corridor width, used to derive px/cm from the ROI
+
+# --- Stride filtering (stage 6) -----------------------------------------------
+stride_filtering:
+  confidence_threshold: 0.3     # minimum mean keypoint confidence per video
+  angular_velocity_min: -20.0   # deg/s — straight-line walking, lower bound
+  angular_velocity_max: 20.0    # deg/s — straight-line walking, upper bound
+  remove_edge_strides: true     # drop the first and last stride of every video
+  filter_forward_direction: true  # keep strides whose body-frame stride length has the batch's
+                                  # majority sign (strides along the maze stem; see the README)
+
+# --- Metrics entering the mixed models ----------------------------------------
+metrics:
+  - {col: stride_length_euclid_cm, label: "Stride Length"}
+  - {col: step_length_cm, label: "Step Length"}
+  - {col: step_width_cm, label: "Step Width"}
+  - {col: duration_ms, label: "Stride Duration"}
+  - {col: step_freq_hz, label: "Step Frequency", derived: "1000 / duration_ms"}
+  - {col: limb_duty_factor_mean, label: "Limb Duty Factor"}
+  - {col: temporal_symmetry, label: "Temporal Symmetry"}
+  - {col: angular_velocity_deg_s_mean, label: "Angular Velocity"}
+  - {col: nose_lat_disp_norm, label: "Snout Lateral Disp."}
+  - {col: tailbase_lat_disp_norm, label: "Tailbase Lateral Disp."}
+  - {col: tailtip_lat_disp_norm, label: "Tailtip Lateral Disp."}
+  - {col: nose_lat_phase_pct, label: "Snout Phase"}
+  - {col: tailbase_lat_phase_pct, label: "Tailbase Phase"}
+  - {col: tailtip_lat_phase_pct, label: "Tailtip Phase"}
+
+covariates:
+  speed: stride_speed_cm_s_mean
+  body_length: body_length_cm
+
+# --- Mixed models (stage 9) ----------------------------------------------------
+# Each model is: z-scored metric ~ Genotype [+ Sex if has_sex] + z-scored covariates,
+# with a random intercept per mouse (statsmodels mixedlm, REML).
+models:
+  M1:                                        # all genotype effects, including those mediated by speed
+    covariates: [body_length_cm]
+  M2:                                        # genotype effects with speed held constant
+    covariates: [stride_speed_cm_s_mean, body_length_cm]
+    skip_outcome_if_covariate: true
+
+statistics:
+  reference_genotype: "WT"                   # the genotype every other one is compared with
+  genotype_order: ["WT", "APP", "Tau"]       # labels as written in metadata_csv; a batch may contain
+                                             # any subset that includes the reference. Other labels are left out.
+  optimizer: "powell"
+
+# --- WT vs Tau classifier (stage 10) -------------------------------------------
+# Needs mice labelled WT and Tau (at least 5 of each).
+classification:
+  merged_data_csv: null                      # a ready per-mouse feature table; null = build it from the batches
+  # Optional p-values used to rank the features (feature name: p). Features without an entry are
+  # ranked by a WT-vs-Tau t-test on the per-mouse values.
+  # gait_lmm_pvalues: {stride_length_euclid_cm: 0.001}
+  # tmaze_lmm_pvalues: {num_probes: 0.004}

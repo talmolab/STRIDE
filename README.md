@@ -61,6 +61,9 @@ pip install -e .
 
 # Or with uv
 uv pip install -e .
+
+# With the test tools (pytest)
+pip install -e ".[dev]"
 ```
 
 > **Inference runtime (stages 1–2).** SLEAP pose/ROI inference runs on a **separate GPU environment**
@@ -70,39 +73,75 @@ uv pip install -e .
 
 ## Quick Start
 
+### Try it on the mock data (no videos, models or GPU needed)
+
+The repository can generate a small synthetic T-maze batch (blank videos, generated pose and ROI
+files, known answers) that runs through every stage in about a minute:
+
+```bash
+pip install -e ".[dev]"
+python tests/mock/make_mock_dataset.py --out tests/mock/_data --only core
+python run_all.py --config tests/mock/_data/core/config.readme.yaml --output mock_output
+stride status --output mock_output          # what was run, when, with which code
+pytest tests                                # the regression tests use the same generator
+```
+
+Stage 1-2 reports that the batch has no model paths and uses the generated pose / ROI files. The mock
+batch is drawn at 16 px/cm, so the gait stage prints its "below 20 px/cm" warning — expected here.
+`mock_output/mock_core/` then holds the decisions, strides and run manifests; `mock_output/` the
+mixed-model table, heatmaps and classifier figures.
+
 ### Full pipeline (config-driven)
 
 ```bash
-# Edit config.yaml with your batch paths, then:
-python run_all.py --config config.yaml
+# Copy config.example.yaml, edit the batch (videos, metadata, models), then:
+python run_all.py --config my_config.yaml --output output
+python run_all.py --config my_config.yaml --output output --batch my_batch      # one batch
+python run_all.py --config my_config.yaml --output output --stages 3,4-6,7-9    # selected stages
 ```
+
+Each stage reads what the previous one wrote under `<output>/<batch>/`, so a batch needs only the
+inputs you provide (videos, metadata, models). A stage that fails stops the run with a non-zero exit
+code and prints the reason. `config.yaml` in this repository is the configuration of the paper's own
+cohorts (lab paths); start from [`config.example.yaml`](config.example.yaml).
 
 ### Individual stages
 
 ```bash
-# T-maze behavioral analysis
-stride analyze-decisions --videos /path/to/videos --yml /path/to/roi_yml --meta meta.csv
+# T-maze behavioral analysis -> decisions/{decisions,events,metrics}.csv
+stride analyze-decisions --videos /path/to/videos --yml /path/to/roi_yml --meta meta.csv --output decisions
 
-# Gait extraction (stride detection)
-python -m stride.stages.run_gait_extraction --config config.yaml
-
-# LMM statistical analysis
-python -m stride.stages.gait_lmm --config config.yaml
-
-# Classification
-python -m stride.stages.classification --config config.yaml
+# The config-driven stages, one at a time (same --config / --output as run_all.py)
+python -m stride.stages.run_tmaze           --config my_config.yaml --output output   # stage 3
+python -m stride.stages.run_gait_extraction --config my_config.yaml --output output   # stages 4-6
+python -m stride.stages.gait_lmm            --config my_config.yaml --output output   # stages 7-9
+python -m stride.stages.classification      --config my_config.yaml --output output   # stage 10
 ```
 
 ### Adding a new batch
 
-1. Add a batch entry to `config.yaml` with video paths, model paths, and metadata
-2. Run `python run_all.py --batch your_batch_name`
+1. Add a batch entry to your config with video paths, model paths, and metadata
+2. Run `python run_all.py --config my_config.yaml --output output --batch your_batch_name`
 
 No code changes required — all batch-specific parameters are config-driven.
 
+### What the pipeline expects from a recording
+
+- Video files named `Day<N>_<mouse>_Trial<T>.mp4` (any letter case; per-day subfolders are fine), with the
+  pose file next to each video (`<video name>.slp`, or the batch's `pose_slp_suffix`).
+- One ROI file per video: written by stage 2 (`<output>/<batch>/roi_yml/`), in the batch's `yml_dir`, or
+  next to the video as `<video name>.rois.yml`.
+- `meta_trials_csv` with columns `day,mouse,reward` (day written like `Day1`; reward `L` or `R`) and
+  `metadata_csv` with `Mouse,Gender,Genotype`. Videos without a reward row and metadata rows without a
+  video are listed as warnings.
+- For gait: at least 100 fps and 20 px/cm, and the maze stem running left to right in the image (the
+  orientation of the paper's recordings). The gait stage warns when a recording does not meet these; it
+  does not correct for them.
+
 ## Configuration
 
-All parameters are centralized in `config.yaml`:
+All parameters are centralized in one YAML file ([`config.example.yaml`](config.example.yaml) is a
+commented template with every key the pipeline reads):
 
 ```yaml
 batches:
@@ -127,19 +166,21 @@ stride_filtering:
   angular_velocity_min: -20.0 # deg/s
   angular_velocity_max: 20.0  # deg/s
 
-models:
+models:            # z-scored metric ~ Genotype [+ Sex] + z-scored covariates, random intercept per mouse
   M1:
-    formula: "{outcome} ~ C(Genotype, Treatment('WT')) + scale(body_length_cm)"
+    covariates: [body_length_cm]
   M2:
-    formula: "{outcome} ~ C(Genotype, Treatment('WT')) + scale(stride_speed_cm_s_mean) + scale(body_length_cm)"
+    covariates: [stride_speed_cm_s_mean, body_length_cm]
 ```
 
 ## Project Structure
 
 ```
 stride/
-  config.yaml              # Pipeline configuration
+  config.example.yaml      # Commented configuration template (start here)
+  config.yaml              # Configuration of the paper's cohorts (lab paths)
   run_all.py               # Orchestrator (runs all stages)
+  tests/                   # pytest suite + tests/mock/ (synthetic T-maze generator and runners)
   src/stride/
     cli.py                 # Click CLI for individual stages
     config.py              # PipelineConfig dataclass
@@ -156,10 +197,14 @@ stride/
       run_inference.py     # [1-2] Config-driven inference runner (distortion + pose + ROI + yaml)
       run_tmaze.py         # Config-driven T-maze runner
       run_gait_extraction.py # Config-driven gait extraction runner
+      batch_paths.py       # Where each stage finds its inputs under <output>/<batch>/
       safety_checks.py     # Gate checks (calibration / ROI coverage / fps / body-length)
+    run_manifest.py        # Provenance sidecar written by every stage
     utils/
-      checkpoint.py        # Resume support for batch processing
-      parallel.py          # Multi-GPU parallel processing
+      checkpoint.py        # Legacy checkpoint-file reader
+      parallel.py          # Parallel processing + video discovery (recursive, any letter case)
+      pose_io.py           # Pose-file loading (handles .slp files made on another machine)
+      roi.py               # ROI-file helpers
       video.py             # Video I/O utilities
 ```
 
@@ -172,7 +217,8 @@ stride/
 | 3 | `learning_cycle_1.csv` | Trials before reward reversal |
 | 5 | `gait_per_stride.csv` | Per-stride metrics (14 gait variables) |
 | 6 | `gait_per_stride_filtered.csv` | Quality-filtered strides |
-| 9 | `lmm_results_all.csv` | M1/M2 LMM coefficients, p-values, FDR |
+| 9 | `lmm_results_all.csv` | M1/M2 LMM coefficients, p-values, FDR (`<genotype>_fdr`: Benjamini-Hochberg within batch × model) |
+| 9 | `lmm_fit_log.csv` | Every metric × model: fitted or not, and why not |
 | 9 | `heatmap_*.png` | Dual-panel heatmaps (-log10(p) + effect sizes) |
 | 10 | `regression_roc_curves.png` | ROC curves for T-maze, Gait, Combined |
 | all | `<stage>_run_manifest.yaml` | **Provenance sidecar** — see below |
@@ -180,10 +226,12 @@ stride/
 ### Run manifest (provenance)
 
 Every pipeline stage writes a `<stage>_run_manifest.yaml` next to its outputs recording **how** they
-were produced, so a run stays reproducible and auditable long after the fact:
+were produced, so a run stays reproducible and auditable long after the fact (`inference`, `decisions`,
+`tmaze`, `gait`, `gait_filtering`, `lmm`, `classification`; the same files are written when the stage
+functions are called from Python). `stride status --output <dir>` lists the manifests of a run.
 
 - `timestamp_utc`, `stride_version`, and the exact **git** commit/branch (plus a `dirty` flag)
-- the **models** used (paths + size/mtime fingerprint)
+- the **models** used (paths + size/mtime fingerprint of the checkpoint and config files inside each model folder)
 - the **parameters** and the **inputs**/**outputs** (with CSV row counts)
 - the **environment** — Python + key package versions (`sleap-nn`, `sleap-io`, `numpy`, …), host, command
 
@@ -214,7 +262,9 @@ STRIDE requires two trained SLEAP models that are **not bundled in this reposito
 - **Pose** — 15-keypoint top-down model (centroid + centered-instance)
 - **ROI** — 7-region maze-segmentation model
 
-Point `pose_model_paths` and `roi_model_paths` in `config.yaml` at your local copies.
+Point `pose_model_paths` and `roi_model_paths` in your config at your local copies (or pass `--model` to
+`stride pose-inference` / `stride roi-inference`, `--pose-model` / `--roi-model` to `stride run`). There
+are no built-in default model paths.
 
 <!-- TODO(before submission): deposit the trained pose + ROI models (with their sleap-nn training
      version) to a citable archive (Zenodo/OSF/HuggingFace) and add the DOI + download steps here. -->

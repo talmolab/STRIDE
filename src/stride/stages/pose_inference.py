@@ -11,8 +11,15 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-from stride.config import DEFAULT_POSE_MODELS
+from stride.config import DEFAULT_POSE_MODELS, check_device, require_sleap_nn, resolve_model_paths
 from stride.utils.parallel import find_videos
+
+
+def pose_output_path(video_path: Path, output_dir: Optional[Path] = None) -> Path:
+    """Where the pose file of a video is written (next to the video, or in output_dir)."""
+    if output_dir is not None:
+        return Path(output_dir) / f"{video_path.stem}.slp"
+    return video_path.with_suffix(".slp")
 
 
 def run_pose_inference_batch(
@@ -26,19 +33,19 @@ def run_pose_inference_batch(
     num_workers: int = 1,
 ) -> dict:
     """
-    Run pose inference on all videos in a directory.
+    Run pose inference on all videos in a directory (searched recursively, .mp4 / .MP4).
 
     For multi-GPU parallelism, run multiple processes with different worker_id values:
         # Terminal 1 - GPU 0
-        tmaze pose-inference -i /videos --gpu 0 --worker-id 0 --num-workers 2
+        stride pose-inference -i /videos -m <centroid> -m <centered_instance> --gpu 0 --worker-id 0 --num-workers 2
 
         # Terminal 2 - GPU 1
-        tmaze pose-inference -i /videos --gpu 1 --worker-id 1 --num-workers 2
+        stride pose-inference -i /videos -m <centroid> -m <centered_instance> --gpu 1 --worker-id 1 --num-workers 2
 
     Args:
         video_dir: Directory containing input videos
         output_dir: Directory for output .slp files (default: same as video)
-        model_paths: List of model paths [centroid, centered_instance]
+        model_paths: List of model paths [centroid, centered_instance] (required)
         overwrite: Whether to overwrite existing outputs
         batch_size: Batch size for inference
         device: Device to run inference on (cuda, cuda:0, cuda:1, cpu)
@@ -47,15 +54,14 @@ def run_pose_inference_batch(
 
     Returns:
         Summary dict with counts
+
+    Raises:
+        ValueError: no model given / model path missing
+        RuntimeError: sleap-nn not installed, or a CUDA device requested with no GPU visible
     """
-    # Use default models if not specified
-    if model_paths is None:
-        model_paths = [str(p) for p in DEFAULT_POSE_MODELS if p.exists()]
+    model_paths = resolve_model_paths(model_paths, "pose")
 
-    if not model_paths:
-        raise ValueError("No pose models found. Please specify --model paths.")
-
-    all_videos = find_videos(video_dir, pattern="*.mp4")
+    all_videos = find_videos(video_dir, extensions=(".mp4",))
 
     # Partition videos across workers - each worker processes every Nth video
     if num_workers > 1:
@@ -74,6 +80,16 @@ def run_pose_inference_batch(
         "num_workers": num_workers,
         "details": [],
     }
+
+    if not all_videos:
+        print(f"No .mp4 videos found under {video_dir} (searched recursively, any letter case)")
+        return results
+
+    # Only check the runtime / device when there is work to do (a finished folder still resumes).
+    todo = [v for v in videos if overwrite or not pose_output_path(v, output_dir).exists()]
+    if todo:
+        require_sleap_nn()
+        check_device(device)
 
     for i, video_path in enumerate(videos, 1):
         result = run_single_pose_inference(
@@ -94,8 +110,10 @@ def run_pose_inference_batch(
         else:
             results["failed"] += 1
 
-        # Print progress
-        print(f"[{i}/{len(videos)}] {result['status'].upper():5} {video_path.name}")
+        # Print progress (with the reason when a video failed)
+        why = result.get("error") or result.get("reason") or ""
+        why = f"  ({why})" if why and result["status"] not in ("ok", "skip") else ""
+        print(f"[{i}/{len(videos)}] {result['status'].upper():5} {video_path.name}{why}")
 
     return results
 
@@ -122,23 +140,17 @@ def run_single_pose_inference(
     Returns:
         Result dict with status
     """
-    # Use default models if not specified
-    if model_paths is None:
-        model_paths = [str(p) for p in DEFAULT_POSE_MODELS if p.exists()]
-
     if not model_paths:
         return {
             "status": "error",
             "video": video_path.name,
-            "error": "No pose models found",
+            "error": "No pose models given",
         }
 
     # Output path - co-located with video or in output_dir
     if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{video_path.stem}.slp"
-    else:
-        output_path = video_path.with_suffix(".slp")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_path = pose_output_path(video_path, output_dir)
 
     if output_path.exists() and not overwrite:
         return {"status": "skip", "video": video_path.name, "reason": "exists"}
@@ -177,7 +189,7 @@ def run_single_pose_inference(
         return {
             "status": "error",
             "video": video_path.name,
-            "error": str(e),
+            "error": f"{type(e).__name__}: {e}",
         }
 
 
@@ -188,12 +200,8 @@ def check_pose_models(model_paths: Optional[list] = None) -> tuple[bool, str]:
     Returns:
         Tuple of (success, message)
     """
-    if model_paths is None:
-        model_paths = DEFAULT_POSE_MODELS
-
-    missing = [str(p) for p in model_paths if not Path(p).exists()]
-
-    if missing:
-        return False, f"Missing models: {', '.join(missing)}"
-
-    return True, f"Found {len(model_paths)} model(s)"
+    try:
+        paths = resolve_model_paths(model_paths, "pose")
+    except ValueError as e:
+        return False, str(e)
+    return True, f"Found {len(paths)} model(s)"
