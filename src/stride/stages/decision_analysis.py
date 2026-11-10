@@ -1,7 +1,7 @@
 """
 T-maze arm entry decision analysis with depth-based commit detection.
 
-Adapted from: 2025-12-10-GoPro-Tmaze-analysis/pilot_decision.eda.02.ipynb
+Ported from the analysis notebooks of the original study.
 
 This module analyzes pose and ROI data to determine which arm the mouse
 entered first, with depth-based validation requiring:
@@ -1089,7 +1089,7 @@ def find_first_entry(pct_cover: pd.DataFrame, region: str, threshold: float = 50
     return None
 
 
-# Probe detection thresholds (from pilot_analysis.eda.01.ipynb)
+# Probe detection thresholds (from the analysis notebooks of the original study)
 PROBE_ARM_MAX = 40.0    # Max body coverage in arm (snout pokes, body stays in junction)
 PROBE_JUNC_MIN = 30.0   # Min junction coverage (body must be in junction area)
 PROBE_MIN_LEN = 2       # Min frames for a probe episode
@@ -1108,7 +1108,7 @@ def count_snout_probes(pct_cover: pd.DataFrame, roi_polys: dict,
       - Junction coverage >= junc_min (body is still in junction area)
       - Episode lasts >= min_len frames
 
-    PROVENANCE: Ported verbatim from pilot_analysis.eda.01.ipynb lines 402-447.
+    PROVENANCE: Ported verbatim from the analysis notebooks of the original study.
     """
     if commit_frame is None:
         Tcut = len(pct_cover)
@@ -1158,7 +1158,7 @@ def count_junction_explore_frames(dwell_df: pd.DataFrame, commit_frame: int | No
     Uses pre-computed dwell intervals (not raw coverage frames) to match
     the manual notebook's algorithm.
 
-    PROVENANCE: Matches pilot_analysis.eda.01.ipynb lines 642-648.
+    PROVENANCE: Matches the analysis notebooks of the original study.
     """
     if commit_frame is None or dwell_df is None or dwell_df.empty:
         return 0

@@ -1,7 +1,7 @@
 """
 Gait stride analysis and filtering.
 
-Adapted from: 2025-12-12-GoPro-Tmaz-gait-analysis/01.filter_strides_by_confidence.py
+Ported from the analysis scripts of the original study.
 
 This module filters gait stride data based on confidence thresholds
 and removes edge strides from continuous sequences.

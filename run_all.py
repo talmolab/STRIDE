@@ -15,11 +15,11 @@ Stages:
 Each stage checks for output file existence before running (resumable).
 
 Usage (from the repo root):
-    python run_all.py                      # uses ./config.yaml, writes ./output/
-    python run_all.py --batch gopro_sept2025
-    python run_all.py --stages 7-9         # only LMM
-    python run_all.py --stages 3,7-9       # skip inference, run decisions + LMM
-    python run_all.py --stages 1-2,3,4-6   # full from scratch through filtering
+    python run_all.py --config my_config.yaml          # copy config.example.yaml, edit the batch
+    python run_all.py --config my_config.yaml --batch my_batch
+    python run_all.py --config my_config.yaml --stages 7-9         # only LMM
+    python run_all.py --config my_config.yaml --stages 3,7-9       # skip inference, run decisions + LMM
+    python run_all.py --config my_config.yaml --stages 1-2,3,4-6   # from scratch through filtering
 
 Each stage reads what the previous one wrote under <output>/<batch>/ unless the batch config
 names an explicit path. A stage that fails stops the run with a non-zero exit code.
@@ -74,10 +74,6 @@ def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
         return False
 
     # Resolve to absolute paths so stage subprocesses are CWD-independent.
-    # (A relative --config previously broke: stages ran with cwd set to the
-    # PARENT of the repo — a relic of the pre-package `automated_pipeline/`
-    # layout — so `config.yaml` raised FileNotFoundError even when the user
-    # ran from the repo root, exactly as the README instructs.)
     cmd = [sys.executable, str(script),
            "--config", str(Path(config).resolve()),
            "--output", str(Path(output).resolve())]
@@ -101,7 +97,8 @@ def run_stage(stage_key: str, stage_info: dict, config: str, output: str,
 def main():
     parser = argparse.ArgumentParser(description="T-Maze Pipeline Orchestrator")
     parser.add_argument("--config", default=str(PIPELINE_DIR / "config.yaml"),
-                        help="Pipeline config (default: config.yaml next to this script)")
+                        help="Pipeline config (default: config.yaml next to this script; "
+                             "copy config.example.yaml to make one)")
     parser.add_argument("--output", default="output",
                         help="Output directory (default: ./output, resolved from CWD)")
     parser.add_argument("--batch", default=None, help="Process only this batch key")
@@ -114,7 +111,8 @@ def main():
 
     if not Path(args.config).exists():
         print(f"ERROR: config file not found: {args.config}\n"
-              f"       Pass --config <your config.yaml> (start from config.example.yaml).")
+              f"       Copy config.example.yaml (repository root), edit its `batches:` section and pass it "
+              f"with --config.")
         sys.exit(2)
 
     print("=" * 60)

@@ -20,7 +20,7 @@ pose quality, calibration, camera, behaviour, batch composition) plus:
 
 * ``meta_trials.csv``      day,mouse,reward            (decision stage input)
 * ``metadata.csv``         Mouse,Gender,Genotype       (enrichment input)
-* ``config.readme.yaml``   the repo config.yaml with ``batches:`` replaced by ONE batch that has
+* ``config.readme.yaml``   the repo config.example.yaml with ``batches:`` replaced by ONE batch that has
                            exactly the fields the README shows for a new batch
 * ``truth.csv``            what was planted per clip (choice, probes, stride length, speed, ...)
 * ``scenario.json``        description + the paths a test needs
@@ -549,7 +549,7 @@ def write_tables(scn: Scenario, sdir: Path, clips, genotypes: dict | None = None
 
 
 def write_config(scn: Scenario, sdir: Path, vdir: Path, ydir: Path, base_cfg: dict):
-    """The shipped config.yaml with `batches:` replaced by one batch carrying exactly the fields the
+    """The shipped config.example.yaml with `batches:` replaced by one batch carrying exactly the fields the
     README lists for a new batch (plus pose_slp_suffix / px_per_cm_override where the scenario is
     about them).  gait_extraction.n_workers is lowered to 4 to keep the mock run light."""
     key = f"mock_{scn.name}"
@@ -747,7 +747,7 @@ def main():
         ap.error("--out is required")
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    base_cfg = yaml.safe_load((REPO / "config.yaml").read_text())
+    base_cfg = yaml.safe_load((REPO / "config.example.yaml").read_text(encoding="utf-8"))
     by_name = {s.name: s for s in scns}
     want = set(a.only.split(",")) if a.only else set(by_name)
     total = 0

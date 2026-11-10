@@ -5,9 +5,14 @@
 #
 #     python run_all.py --config my_config.yaml --output output
 #
-# Every key below is read by the pipeline. The analysis settings further down
-# (stride detection, filtering, metrics, models, statistics) are the values used
-# in the STRIDE paper; change them only if you mean to change the analysis.
+# This is the one configuration file the repository ships. It drives the stage-by-stage
+# runner (run_all.py: inference, decisions, gait, mixed models, classifier) and it is the
+# `stats_config` of `stride tmaze` when the optional statistics steps are switched on.
+# (`stride tmaze` and `stride gait` have their own short configs: `stride init-config`.)
+#
+# The analysis settings further down (stride detection, filtering, metrics, models,
+# statistics) are the values used in the STRIDE paper; change them only if you mean to
+# change the analysis.
 #
 # A batch = one cohort recorded on one rig (one camera, one frame rate).
 # ============================================================================
@@ -83,50 +88,151 @@ stride_filtering:
   angular_velocity_max: 20.0    # deg/s — straight-line walking, upper bound
   remove_edge_strides: true     # drop the first and last stride of every video
   filter_forward_direction: true  # keep strides whose body-frame stride length has the batch's
-                                  # majority sign (strides along the maze stem; see the README)
+                                  # majority sign (strides along the maze stem; see docs/gait.md)
+
+# --- Trial phase tagging (stage 7) ---------------------------------------------
+# Documents how strides are tagged relative to the trial events (the stage applies these values).
+trial_phase_tagging:
+  task_window:
+    start: "gate_frame"         # column in decisions.csv
+    end: "entry_frame"          # column in decisions.csv
+  poked_return_speed_threshold: 2.0  # x times the mouse's within-trial median speed
+  default_filter: "task"        # which trial_phase the mixed models analyse
 
 # --- Metrics entering the mixed models ----------------------------------------
 metrics:
-  - {col: stride_length_euclid_cm, label: "Stride Length"}
-  - {col: step_length_cm, label: "Step Length"}
-  - {col: step_width_cm, label: "Step Width"}
-  - {col: duration_ms, label: "Stride Duration"}
-  - {col: step_freq_hz, label: "Step Frequency", derived: "1000 / duration_ms"}
-  - {col: limb_duty_factor_mean, label: "Limb Duty Factor"}
-  - {col: temporal_symmetry, label: "Temporal Symmetry"}
-  - {col: angular_velocity_deg_s_mean, label: "Angular Velocity"}
-  - {col: nose_lat_disp_norm, label: "Snout Lateral Disp."}
-  - {col: tailbase_lat_disp_norm, label: "Tailbase Lateral Disp."}
-  - {col: tailtip_lat_disp_norm, label: "Tailtip Lateral Disp."}
-  - {col: nose_lat_phase_pct, label: "Snout Phase"}
-  - {col: tailbase_lat_phase_pct, label: "Tailbase Phase"}
-  - {col: tailtip_lat_phase_pct, label: "Tailtip Phase"}
+  - col: stride_length_euclid_cm
+    label: "Stride Length"
+    category: Spatial
+    units: cm
 
+  - col: step_length_cm
+    label: "Step Length"
+    category: Spatial
+    units: cm
+
+  - col: step_width_cm
+    label: "Step Width"
+    category: Spatial
+    units: cm
+
+  - col: duration_ms
+    label: "Stride Duration"
+    category: Temporal
+    units: ms
+
+  - col: step_freq_hz
+    label: "Step Frequency"
+    category: Temporal
+    units: Hz
+    derived: "1000 / duration_ms"
+
+  - col: limb_duty_factor_mean
+    label: "Limb Duty Factor"
+    category: Temporal
+    units: unitless
+
+  - col: temporal_symmetry
+    label: "Temporal Symmetry"
+    category: Temporal
+    units: unitless
+
+  - col: angular_velocity_deg_s_mean
+    label: "Angular Velocity"
+    category: Other
+    units: deg/s
+
+  - col: nose_lat_disp_norm
+    label: "Snout Lateral Disp."
+    category: Body dynamics
+    units: unitless
+
+  - col: tailbase_lat_disp_norm
+    label: "Tailbase Lateral Disp."
+    category: Body dynamics
+    units: unitless
+
+  - col: tailtip_lat_disp_norm
+    label: "Tailtip Lateral Disp."
+    category: Body dynamics
+    units: unitless
+
+  - col: nose_lat_phase_pct
+    label: "Snout Phase"
+    category: Phase
+    units: "% stride"
+
+  - col: tailbase_lat_phase_pct
+    label: "Tailbase Phase"
+    category: Phase
+    units: "% stride"
+
+  - col: tailtip_lat_phase_pct
+    label: "Tailtip Phase"
+    category: Phase
+    units: "% stride"
+
+# --- Covariates (not tested as outcomes) ---------------------------------------
 covariates:
   speed: stride_speed_cm_s_mean
   body_length: body_length_cm
 
 # --- Mixed models (stage 9) ----------------------------------------------------
 # Each model is: z-scored metric ~ Genotype [+ Sex if has_sex] + z-scored covariates,
-# with a random intercept per mouse (statsmodels mixedlm, REML).
+# with a random intercept per mouse (statsmodels mixedlm, REML). `description` and `formula`
+# document the model; the stage builds it from `covariates`.
 models:
-  M1:                                        # all genotype effects, including those mediated by speed
+  M1:
+    description: "Detects ALL genotype effects (including speed-mediated)"
+    formula: "{outcome} ~ C(Genotype, Treatment('WT')) + scale(body_length_cm)"
     covariates: [body_length_cm]
-  M2:                                        # genotype effects with speed held constant
-    covariates: [stride_speed_cm_s_mean, body_length_cm]
-    skip_outcome_if_covariate: true
 
+  M2:
+    description: "Isolates DIRECT genotype effects (controlling for speed)"
+    formula: "{outcome} ~ C(Genotype, Treatment('WT')) + scale(stride_speed_cm_s_mean) + scale(body_length_cm)"
+    covariates: [stride_speed_cm_s_mean, body_length_cm]
+    skip_outcome_if_covariate: true  # skip a metric that is itself a covariate of the model
+
+# --- Statistical parameters ----------------------------------------------------
 statistics:
   reference_genotype: "WT"                   # the genotype every other one is compared with
   genotype_order: ["WT", "APP", "Tau"]       # labels as written in metadata_csv; a batch may contain
                                              # any subset that includes the reference. Other labels are left out.
   optimizer: "powell"
+  fdr_alpha: 0.05
+  fdr_method: "fdr_bh"                       # Benjamini-Hochberg
+
+# --- Figures -------------------------------------------------------------------
+colors:
+  WT: "#1964B0"
+  APP: "#AE75A2"
+  Tau: "#F4A637"
+
+significance_markers:
+  "***": 0.001
+  "**": 0.01
+  "*": 0.05
 
 # --- WT vs Tau classifier (stage 10) -------------------------------------------
 # Needs mice labelled WT and Tau (at least 5 of each).
 classification:
-  merged_data_csv: null                      # a ready per-mouse feature table; null = build it from the batches
-  # Optional p-values used to rank the features (feature name: p). Features without an entry are
-  # ranked by a WT-vs-Tau t-test on the per-mouse values.
-  # gait_lmm_pvalues: {stride_length_euclid_cm: 0.001}
-  # tmaze_lmm_pvalues: {num_probes: 0.004}
+  merged_data_csv: null         # a ready per-mouse feature table; null = build it from the batches
+  n_splits: 5                   # StratifiedKFold splits
+  random_state: 42
+  target_genotypes: ["WT", "Tau"]
+  # Optional p-values used to rank the features (feature name: p), e.g. the mixed-model p-values of
+  # your own study. A feature without an entry is ranked by a WT-vs-Tau t-test on the per-mouse values.
+  gait_lmm_pvalues: {}          # e.g. {stride_length_euclid_cm: 0.001, step_freq_hz: 0.02}
+  tmaze_lmm_pvalues: {}         # e.g. {num_probes: 0.004}
+
+# --- Regional analysis ----------------------------------------------------------
+regional:
+  regions: ["stem", "junction", "arm"]
+  n_bins_per_region: 10
+  metrics_subset:
+    - stride_length_euclid_cm
+    - step_freq_hz
+    - limb_duty_factor_mean
+    - temporal_symmetry
+    - tailtip_lat_disp_norm
+    - tailbase_lat_phase_pct

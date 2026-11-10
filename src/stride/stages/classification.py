@@ -10,10 +10,10 @@
 # ]
 # ///
 """
-Config-driven WT vs Tau logistic regression (Figure 7).
+Config-driven WT vs Tau logistic regression.
 
-Approach (matching manuscript _shared.py):
-  - Gait p-values: from GoPro batch M2 LMM (stride-level, speed+body corrected)
+Approach (as in the original study):
+  - Gait p-values: `classification.gait_lmm_pvalues` in the config (e.g. the M2 mixed-model values)
   - T-maze p-values: LMM where available, t-test as fallback (per-mouse level)
   - Features ranked by p-value, classifiers evaluated at K=1..N
   - Logistic regression with 5-fold stratified CV, balanced class weights
@@ -262,8 +262,8 @@ def load_per_mouse_features(config: dict, output_dir: Path | None = None) -> pd.
 def rank_features(data: pd.DataFrame, config: dict) -> pd.DataFrame:
     """Rank features by p-value: LMM for gait, LMM/t-test for T-maze.
 
-    Uses hardcoded p-values from config.yaml (authoritative LMM values),
-    falls back to t-test for features without LMM p-values.
+    Uses the p-values listed in the config (`classification.gait_lmm_pvalues`,
+    `tmaze_lmm_pvalues`); falls back to a t-test for features without an entry.
     """
     class_cfg = config.get("classification", {})
 
@@ -453,7 +453,7 @@ def _check_inputs(data: pd.DataFrame, feature_df: pd.DataFrame) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WT vs Tau logistic regression (Figure 7)")
+    parser = argparse.ArgumentParser(description="WT vs Tau logistic regression")
     parser.add_argument("--config", default="config.yaml", help="Pipeline config (default: ./config.yaml)")
     parser.add_argument("--output", default="output", help="Output directory (default: ./output)")
     args = parser.parse_args()
