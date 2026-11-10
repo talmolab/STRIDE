@@ -35,3 +35,21 @@ def load_pose_labels(pose_path, video_path: Optional[Path] = None):
                     except Exception:
                         pass
         return labels
+
+
+def resolve_pose_path(video_path, pose_slp_suffix: str = ".slp", pose_dir=None) -> Path:
+    """Pose file of a video: next to the video, else ``<pose_dir>/<video stem><suffix>``.
+
+    Returns the path next to the video when neither exists (callers test ``.exists()``), so
+    with ``pose_dir=None`` this is exactly ``video_path.with_suffix(pose_slp_suffix)``.
+    """
+    video_path = Path(video_path)
+    colocated = video_path.with_suffix(pose_slp_suffix)
+    if pose_dir is None or colocated.exists():
+        return colocated
+    many = pose_dir if isinstance(pose_dir, (list, tuple)) else [pose_dir]   # one folder or several
+    for d in many:
+        alt = Path(d) / f"{video_path.stem}{pose_slp_suffix}"
+        if alt.exists():
+            return alt
+    return colocated

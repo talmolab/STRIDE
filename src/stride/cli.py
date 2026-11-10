@@ -663,5 +663,207 @@ def status(ctx, output_dir, checkpoint):
     console.print(table)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# STRIDE T-maze: the fully automated pipeline
+# ---------------------------------------------------------------------------------------------
+
+def _tmaze_steps():
+    from stride.stages.tmaze_pipeline import STEPS
+    return STEPS
+
+
+@main.command("tmaze")
+@click.argument("videos", nargs=-1, type=click.Path())
+@click.option("--config", "-c", "config_path", type=click.Path(), default=None,
+              help="YAML config (`stride init-config tmaze` writes a template). Options given on "
+                   "the command line override the config.")
+@click.option("--out", "-o", "output", type=click.Path(), default=None, help="Output folder")
+@click.option("--pose-model", "pose_model", multiple=True, type=click.Path(),
+              help="Your trained pose model: give the option once or twice (centroid, centered instance)")
+@click.option("--roi-model", "roi_model", multiple=True, type=click.Path(),
+              help="Your trained maze-ROI model: give the option once or twice")
+@click.option("--metadata", "-m", type=click.Path(), multiple=True,
+              help="Optional CSV (repeatable). Trial rows: `video` (file name) or `day` + `mouse`, plus "
+                   "`reward` (L/R); optional `trial`, `sex`, `genotype`. Mouse rows: `mouse` + `sex` / `genotype`")
+@click.option("--pose-dir", type=click.Path(), default=None,
+              help="Folder with existing pose files, when they are not next to the videos")
+@click.option("--roi-dir", type=click.Path(), default=None,
+              help="Folder with existing ROI files, when they are not next to the videos")
+@click.option("--px-per-cm", "px_per_cm", type=float, default=None,
+              help="Scale you measured yourself (wins over the ChArUco board and the ROI width)")
+@click.option("--maze-width-cm", "maze_width_cm", type=float, default=None,
+              help="Corridor width for the ROI-based scale (default 10)")
+@click.option("--board-squares-x", type=int, default=None, help="ChArUco board: squares along x")
+@click.option("--board-squares-y", type=int, default=None, help="ChArUco board: squares along y")
+@click.option("--board-square-mm", type=float, default=None, help="ChArUco board: square size in mm")
+@click.option("--board-marker-mm", type=float, default=None, help="ChArUco board: marker size in mm")
+@click.option("--board-dict", type=str, default=None, help="ChArUco board: dictionary, e.g. DICT_5X5_250")
+@click.option("--device", type=str, default=None, help="Inference device: auto (default), cuda, cuda:0, cpu")
+@click.option("--workers", "-w", type=int, default=None, help="CPU worker processes for the analysis (default 4)")
+@click.option("--batch-size", type=int, default=None, help="Pose inference batch size (default 16)")
+@click.option("--pose-suffix", type=str, default=None, help="Pose file = <video name><suffix> (default .slp)")
+@click.option("--skip-inference", is_flag=True,
+              help="Do not run the two inferences: analyse the videos that already have pose and ROI files")
+@click.option("--skip", "skip", multiple=True, metavar="STEP",
+              help="Switch a step off (repeatable): distortion_check, calibrate, pose_inference, "
+                   "roi_inference, roi_consensus, decisions, decision_rules, gait")
+@click.option("--enable", "enable", multiple=True, metavar="STEP",
+              help="Switch a step on (repeatable), e.g. mixed_models, classifier (off by default)")
+@click.option("--stop-after", "stop_after", type=str, default=None, metavar="STEP",
+              help="Stop after this step")
+@click.option("--force", is_flag=True, help="Redo steps even when their outputs are up to date")
+@click.option("--strict", is_flag=True, help="Exit with an error when any video was left out")
+@click.pass_context
+def tmaze(ctx, videos, config_path, output, pose_model, roi_model, metadata, pose_dir, roi_dir,
+          px_per_cm, maze_width_cm,
+          board_squares_x, board_squares_y, board_square_mm, board_marker_mm, board_dict, device, workers,
+          batch_size, pose_suffix, skip_inference, skip, enable, stop_after, force, strict):
+    """STRIDE T-maze: videos + your pose and ROI models in, per-trial and per-stride tables out.
+
+    VIDEOS is a folder (searched recursively), a video file, or a pattern; several may be given.
+    Steps: discover, distortion check (report only), scale (px/cm), pose inference, ROI inference
+    (+ consensus ROI), decisions, decision rules, gait. Finished work is not repeated on a second run.
+
+    \b
+    stride tmaze /data/videos --pose-model P1 --pose-model P2 --roi-model R1 --roi-model R2 -o out
+    stride tmaze --config my_tmaze.yaml
+    stride tmaze /data/videos -o out --skip-inference        # pose and ROI files already exist
+    """
+    from stride.stages.tmaze_pipeline import STEPS, TmazeError, TmazeRun, load_settings
+
+    bad = [s for s in list(skip) + list(enable) if s not in STEPS]
+    if bad:
+        _fail(f"unknown step(s) {bad}. Steps: {', '.join(STEPS)}", 2)
+    if stop_after and stop_after not in STEPS:
+        _fail(f"--stop-after {stop_after}: unknown step. Steps: {', '.join(STEPS)}", 2)
+
+    ov: dict = {}
+    if videos:
+        ov["videos"] = list(videos) if len(videos) > 1 else videos[0]
+    if metadata:
+        ov["metadata"] = list(metadata) if len(metadata) > 1 else metadata[0]
+    for key, val in (("output", output), ("device", device), ("workers", workers),
+                     ("batch_size", batch_size), ("pose_suffix", pose_suffix), ("stop_after", stop_after),
+                     ("pose_dir", pose_dir), ("roi_dir", roi_dir)):
+        if val is not None:
+            ov[key] = val
+    if pose_model:
+        ov["pose_model"] = list(pose_model)
+    if roi_model:
+        ov["roi_model"] = list(roi_model)
+    scale: dict = {}
+    if px_per_cm is not None:
+        scale["px_per_cm"] = px_per_cm
+    if maze_width_cm is not None:
+        scale["maze_width_cm"] = maze_width_cm
+    board = {k: v for k, v in (("squares_x", board_squares_x), ("squares_y", board_squares_y),
+                               ("square_mm", board_square_mm), ("marker_mm", board_marker_mm),
+                               ("dictionary", board_dict)) if v is not None}
+    if board:
+        scale["charuco"] = board
+    if scale:
+        ov["scale"] = scale
+    steps = {}
+    if skip_inference:
+        steps.update(pose_inference=False, roi_inference=False)
+    steps.update({s: False for s in skip})
+    steps.update({s: True for s in enable})
+    if steps:
+        ov["steps"] = steps
+    if force:
+        ov["force"] = True
+    if strict:
+        ov["strict"] = True
+
+    try:
+        settings = load_settings(config_path, ov)
+        run = TmazeRun(settings)
+    except TmazeError as exc:
+        _fail(str(exc), 2)
+    summary = run.run()
+    if not summary["ok"]:
+        raise SystemExit(1)
+    if settings.get("strict") and summary["skipped"]:
+        console.print(f"[bold red]ERROR:[/] {len(summary['skipped'])} video(s) were left out (--strict); "
+                      f"see SUMMARY.md", soft_wrap=True)
+        raise SystemExit(1)
+
+
+@main.command("init-config")
+@click.argument("pipeline", type=click.Choice(["tmaze"]), default="tmaze")
+@click.option("--output", "-o", "output_file", type=click.Path(), default=None,
+              help="File to write (default: ./stride_tmaze.yaml)")
+@click.option("--overwrite", is_flag=True, help="Replace the file when it exists")
+def init_config(pipeline, output_file, overwrite):
+    """Write a commented config template for `stride tmaze --config`."""
+    from stride.stages.tmaze_pipeline import TmazeError, write_config_template
+
+    path = Path(output_file) if output_file else Path(f"stride_{pipeline}.yaml")
+    try:
+        write_config_template(path, overwrite=overwrite)
+    except TmazeError as exc:
+        _fail(str(exc), 2)
+    console.print(f"Wrote {path}. Edit it, then run: stride tmaze --config {path}", soft_wrap=True)
+
+
+@main.command("apply-decision-rules")
+@click.argument("decisions_csv", type=click.Path())
+@click.option("--window-s", type=float, default=150.0, show_default=True,
+              help="Decision window: an arm entry after this many seconds is no decision")
+@click.option("--output", "-o", "out_csv", type=click.Path(), default=None,
+              help="File to write (default: decisions_clean.csv next to the input)")
+def apply_decision_rules_cmd(decisions_csv, window_s, out_csv):
+    """Apply the two protocol rules to a decisions.csv and write decisions_clean.csv.
+
+    A trial stays a decision only if the arm entry cleared the strict 95 % body-in-arm threshold
+    and happened within the decision window. The input file is not modified.
+    """
+    from stride.stages.decision_rules import apply_decision_rules
+
+    try:
+        apply_decision_rules(Path(decisions_csv), window_s=window_s, out_csv=Path(out_csv) if out_csv else None)
+    except (FileNotFoundError, ValueError) as exc:
+        _fail(str(exc))
+
+
+@main.command("propagate-roi")
+@click.argument("video_dir", type=click.Path())
+@click.option("--drift-warn", type=float, default=25.0, show_default=True,
+              help="Static-maze guard: max per-vertex spread across the detected ROIs, in px")
+@click.option("--refuse-on-drift", is_flag=True,
+              help="Write nothing when the guard is exceeded (default: write with a warning)")
+@click.option("--qc-frame", type=float, default=0.5, show_default=True,
+              help="Fraction of the clip at which the QC frame is taken")
+@click.option("--qc-out", type=click.Path(), default=None,
+              help="Folder for the QC overlays (default: <VIDEO_DIR>/roi_consensus_qc)")
+def propagate_roi_cmd(video_dir, drift_warn, refuse_on_drift, qc_frame, qc_out):
+    """Give the folder's consensus ROI to the videos without a <video name>.rois.yml.
+
+    The consensus is the per-vertex median of the ROI files detected in the same folder (one
+    recording session: maze and camera did not move). Existing ROI files are never overwritten;
+    QC overlays and montage sheets are written for a person to check.
+    """
+    from stride.stages.roi_consensus import ConsensusError, propagate_roi_in_folder
+
+    if not Path(video_dir).is_dir():
+        _fail(f"folder not found: {video_dir}", 2)
+    try:
+        res = propagate_roi_in_folder(Path(video_dir), drift_warn=drift_warn,
+                                      on_drift="fail" if refuse_on_drift else "warn",
+                                      qc_frame=qc_frame, qc_out=qc_out)
+    except ConsensusError as exc:
+        _fail(str(exc))
+    if not res["recovered"]:
+        console.print("nothing to recover.")
+
+
+
+# px/cm from a ChArUco board in view (`stride calibrate`); also step `calibrate` of `stride tmaze`
+from stride.stages.scale_calibration import calibrate_cmd  # noqa: E402
+
+main.add_command(calibrate_cmd)
+
+
 if __name__ == "__main__":
     main()

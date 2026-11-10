@@ -50,7 +50,7 @@ def load_config_or_exit(config_path) -> dict:
         print(f"ERROR: config file not found: {p}\n"
               f"       Pass --config <your config.yaml> (start from config.example.yaml).")
         sys.exit(2)
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict) or not isinstance(cfg.get("batches"), dict) or not cfg["batches"]:
         print(f"ERROR: {p} has no `batches:` section with at least one batch.")

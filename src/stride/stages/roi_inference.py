@@ -1,10 +1,16 @@
 """
 ROI keypoint inference using SLEAP models.
 
-Adapted from: 2025-12-08-GoPro-roi-inference/00.run-inference.py
+This module runs the ROI model on a few frames of each video (23 maze keypoints for the
+horizontal T-maze) and keeps the best prediction as a one-frame ``.slp``:
 
-This module runs inference on videos to detect ROI keypoints (23 points
-for horizontal T-maze), then selects the best frame from the first N frames.
+1. slice pass   - 10 frames sampled evenly from the middle of the video (20 %-80 %);
+2. full pass    - only if the slice pass finds no usable frame: the whole video;
+3. selection    - see :mod:`stride.stages.roi_selection` (every instance of a frame is evaluated,
+                  strict 23 nodes before all-16-corners, only the chosen instance is kept).
+
+A video with no usable frame in either pass has something hiding a maze corner for the whole clip;
+:mod:`stride.stages.roi_consensus` can then borrow the ROI of the other clips of the same session.
 """
 
 from pathlib import Path
@@ -15,7 +21,12 @@ from stride.config import (
     DEFAULT_ROI_MODELS, STRICT_REQUIRED_23, RELAXED_REQUIRED_20,
     check_device, require_sleap_nn, resolve_model_paths,
 )
+from stride.stages.roi_selection import (
+    build_single_frame_labels, get_sample_frames, select_best_frame_v2,
+)
 from stride.utils.parallel import run_parallel, find_videos
+
+FULL_PASS_BATCH_SIZE = 16   # batch size of the full-video pass (GPU-bound; lower it on a small GPU)
 
 
 def roi_output_path(video_path: Path, output_dir: Path) -> Path:
@@ -32,6 +43,8 @@ def run_roi_inference_batch(
     worker_id: int = 0,
     num_workers: int = 1,
     device: Optional[str] = None,
+    full_pass: bool = True,
+    full_batch_size: int = FULL_PASS_BATCH_SIZE,
 ) -> dict:
     """
     Run ROI inference on all videos in a directory (searched recursively, .mp4 / .MP4).
@@ -48,11 +61,13 @@ def run_roi_inference_batch(
         output_dir: Directory for output .slp files
         model_paths: List of model paths [centroid, centered_instance] (required)
         overwrite: Whether to overwrite existing outputs
-        frames_to_check: Number of frames to check for best ROI
+        frames_to_check: Number of frames sampled from the middle of the video in the slice pass
         worker_id: Worker ID for parallel processing (0-indexed)
         num_workers: Total number of parallel workers
         device: Device for inference (cuda, cuda:0, cpu). None = let sleap-nn choose
             (the behaviour before this option existed).
+        full_pass: Re-run the whole video when the slice pass finds no usable frame
+        full_batch_size: Batch size of that full-video pass
 
     Returns:
         Summary dict with counts
@@ -93,6 +108,8 @@ def run_roi_inference_batch(
             overwrite=overwrite,
             frames_to_check=frames_to_check,
             device=device,
+            full_pass=full_pass,
+            full_batch_size=full_batch_size,
         )
         results.append(result)
         status = result.get("status", "error")
@@ -124,12 +141,15 @@ def run_single_video_inference(
     overwrite: bool = False,
     frames_to_check: int = 10,
     device: Optional[str] = None,
+    full_pass: bool = True,
+    full_batch_size: int = FULL_PASS_BATCH_SIZE,
 ) -> dict:
     """
-    Run ROI inference on a single video.
+    Run ROI inference on a single video: slice pass, then (if needed) the full-video pass.
 
     Returns:
-        Result dict with status
+        Result dict with ``status`` (ok | skip | fail | error); ``pass`` says which pass
+        produced the kept frame ("slice" or "full").
     """
     output_path = roi_output_path(video_path, output_dir)
 
@@ -140,35 +160,51 @@ def run_single_video_inference(
         import sleap_io as sio
         from sleap_nn.predict import run_inference
 
-        # Run inference on first N frames
-        tmp_path = output_dir / f"{video_path.stem}.tmp.slp"
-
         # `device` is forwarded only when the caller asked for one; otherwise sleap-nn picks
-        # the device itself, exactly as before the option existed.
+        # the device itself.
         extra = {"device": device} if device else {}
+
+        # 1) slice pass: frames sampled from the middle of the video
+        tmp_path = output_dir / f"{video_path.stem}.preds.v2.slice{frames_to_check}.tmp.slp"
+        sample_frames = get_sample_frames(video_path, num_frames=frames_to_check)
         run_inference(
             data_path=str(video_path),
             model_paths=model_paths,
             output_path=str(tmp_path),
-            frames=list(range(frames_to_check)),
+            frames=sample_frames,
             **extra,
         )
-
-        # Load predictions and select best frame
         labels = sio.load_file(str(tmp_path))
-        best_idx, best_lf = select_best_frame(labels, max_check=frames_to_check)
+        best_idx, best_lf = select_best_frame_v2(labels, max_check=frames_to_check)
+        used_pass = "slice"
+        tmp_paths = [tmp_path]
+
+        # 2) full pass: the whole video, only when the slice pass found no usable frame
+        if best_lf is None and full_pass:
+            tmp_full = output_dir / f"{video_path.stem}.preds.v2.full.tmp.slp"
+            tmp_paths.append(tmp_full)
+            run_inference(
+                data_path=str(video_path),
+                model_paths=model_paths,
+                output_path=str(tmp_full),
+                batch_size=full_batch_size,
+                **extra,
+            )
+            labels = sio.load_file(str(tmp_full))
+            best_idx, best_lf = select_best_frame_v2(labels, max_check=None)
+            used_pass = "full"
 
         if best_lf is None:
+            for t in tmp_paths:
+                Path(t).unlink(missing_ok=True)
+            why = "no_passing_frame_full" if full_pass else "no_passing_frame"
             return {"status": "fail", "video": video_path.name,
-                    "reason": f"no_valid_frame ({best_idx}: no frame in the first "
-                              f"{frames_to_check} has all required ROI keypoints)"}
+                    "reason": f"{why} (no frame with all 16 maze corners in "
+                              f"{'the whole video' if full_pass else f'the {frames_to_check} sampled frames'}: "
+                              f"a corner is hidden for the whole clip)"}
 
-        # Save single-frame result
-        labels_out = sio.Labels(
-            labeled_frames=[best_lf],
-            videos=labels.videos,
-            skeletons=labels.skeletons if hasattr(labels, "skeletons") else [labels.skeleton],
-        )
+        # Save the single-frame result (only the chosen instance)
+        labels_out = build_single_frame_labels(labels, best_lf)
         # Provenance: keep what sleap-nn recorded and add which models / device / frame were used,
         # so the kept ROI file says how it was produced (best-effort, never fails the video).
         try:
@@ -177,8 +213,10 @@ def run_single_video_inference(
                 "stride_stage": "roi_inference",
                 "stride_roi_model_paths": [str(m) for m in model_paths],
                 "stride_device": str(device) if device else "auto (chosen by sleap-nn)",
-                "stride_frames_checked": int(frames_to_check),
+                "stride_roi_pass": used_pass,
+                "stride_frames_checked": int(frames_to_check) if used_pass == "slice" else int(len(labels)),
                 "stride_best_frame_index": int(best_idx) if isinstance(best_idx, (int, np.integer)) else str(best_idx),
+                "stride_best_video_frame": int(getattr(best_lf, "frame_idx", -1)),
                 "stride_source_video": str(video_path),
             })
             labels_out.provenance = prov
@@ -186,10 +224,11 @@ def run_single_video_inference(
             pass
         sio.save_file(labels_out, str(output_path))
 
-        # Clean up temp file
-        tmp_path.unlink(missing_ok=True)
+        # Clean up temp files
+        for t in tmp_paths:
+            Path(t).unlink(missing_ok=True)
 
-        return {"status": "ok", "video": video_path.name, "output": str(output_path)}
+        return {"status": "ok", "video": video_path.name, "output": str(output_path), "pass": used_pass}
 
     except Exception as e:
         return {"status": "error", "video": video_path.name, "error": f"{type(e).__name__}: {e}"}
@@ -197,97 +236,13 @@ def run_single_video_inference(
 
 def select_best_frame(labels, max_check: int = 10):
     """
-    Select best frame from predictions using strict (23) then relaxed (20) criteria.
+    Select the best frame (and instance) of an ROI prediction file.
+
+    Kept for callers of the earlier API; it is :func:`stride.stages.roi_selection.select_best_frame_v2`:
+    every predicted instance of a frame is evaluated (not only the first), strict 23 nodes take
+    precedence over all-16-corners, and the returned frame keeps only the chosen instance.
 
     Returns:
         Tuple of (frame_index, labeled_frame) or (video_name, None) if none valid
     """
-    import re
-
-    def _norm(name: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", name.lower())
-
-    def get_skeleton_node_names(pred_labels):
-        if hasattr(pred_labels, "skeleton") and hasattr(pred_labels.skeleton, "nodes"):
-            return [n.name for n in pred_labels.skeleton.nodes]
-        try:
-            lf0 = pred_labels[0]
-            if lf0.instances and hasattr(lf0.instances[0], "skeleton"):
-                return [n.name for n in lf0.instances[0].skeleton.nodes]
-        except Exception:
-            pass
-        return []
-
-    skeleton_nodes = get_skeleton_node_names(labels)
-    if not skeleton_nodes:
-        return "UNKNOWN", None
-
-    exact = {name: i for i, name in enumerate(skeleton_nodes)}
-    norm = {_norm(name): i for i, name in enumerate(skeleton_nodes)}
-
-    def lookup_idx(name):
-        if name in exact:
-            return exact[name]
-        return norm.get(_norm(name))
-
-    def get_point_xy(instance, idx):
-        if hasattr(instance, "points"):
-            pts = instance.points
-            if 0 <= idx < len(pts):
-                rec = pts[idx]
-                if hasattr(rec, "dtype") and hasattr(rec.dtype, "names") and "xy" in rec.dtype.names:
-                    xy = rec["xy"]
-                    arr = np.asarray(xy, dtype=np.float64).reshape(-1)
-                    if arr.size >= 2:
-                        return [float(arr[0]), float(arr[1])]
-                try:
-                    arr = np.asarray(rec, dtype=np.float64).reshape(-1)
-                    if arr.size >= 2:
-                        return [float(arr[0]), float(arr[1])]
-                except Exception:
-                    pass
-        return [np.nan, np.nan]
-
-    def is_finite_xy(pt):
-        arr = np.asarray(pt, dtype=np.float64).reshape(-1)
-        return arr.size >= 2 and np.isfinite(arr[:2]).all()
-
-    def eval_frame(lf, required_nodes):
-        if not getattr(lf, "instances", None):
-            return False, -1.0
-        inst = lf.instances[0]
-        for name in required_nodes:
-            j = lookup_idx(name)
-            if j is None:
-                return False, -1.0
-            xy = get_point_xy(inst, j)
-            if not is_finite_xy(xy):
-                return False, -1.0
-        inst_score = float(getattr(inst, "score", 0.0) or 0.0)
-        return True, inst_score
-
-    # Try strict first, then relaxed
-    best_strict = None
-    best_relaxed = None
-    nframes = min(max_check, len(labels))
-
-    for idx in range(nframes):
-        lf = labels[idx]
-
-        ok_s, score_s = eval_frame(lf, STRICT_REQUIRED_23)
-        if ok_s:
-            if best_strict is None or score_s > best_strict[0]:
-                best_strict = (score_s, idx, lf)
-            continue
-
-        ok_r, score_r = eval_frame(lf, RELAXED_REQUIRED_20)
-        if ok_r:
-            if best_relaxed is None or score_r > best_relaxed[0]:
-                best_relaxed = (score_r, idx, lf)
-
-    if best_strict is not None:
-        return best_strict[1], best_strict[2]
-    if best_relaxed is not None:
-        return best_relaxed[1], best_relaxed[2]
-
-    return "NO_VALID_FRAME", None
+    return select_best_frame_v2(labels, max_check=max_check)

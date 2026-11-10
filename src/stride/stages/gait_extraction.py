@@ -116,7 +116,9 @@ def resolve_roi_yml(stem: str, yml_dir=None, video_path=None):
     names = [f"{stem}.preds.v2.best1.yml", f"{stem}.rois.yml", f"{stem}.yml"]
     dirs = []
     if yml_dir is not None:
-        dirs.append(Path(yml_dir))
+        # one folder, or several (searched in the order given)
+        many = yml_dir if isinstance(yml_dir, (list, tuple)) else [yml_dir]
+        dirs.extend(Path(d) for d in many)
     if video_path is not None:
         dirs.append(Path(video_path).parent)  # co-located fallback
     for d in dirs:
@@ -142,7 +144,7 @@ def estimate_cm_per_px_from_yaml(stem: str, yml_dir, maze_width_cm=10.0, video_p
     yml_path = resolve_roi_yml(stem, yml_dir, video_path)
     if yml_path is None:
         raise FileNotFoundError(f"ROI YAML not found for stem '{stem}' (yml_dir={yml_dir})")
-    with open(yml_path, "r") as f:
+    with open(yml_path, "r", encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
     polys = {}
     for r in y.get("rois", []):
@@ -205,10 +207,12 @@ def read_fps(video_obj, video_path: str | Path, yml_dir=None, stem: str | None =
     except Exception: pass
     if yml_dir is not None and stem is not None:
         import yaml
-        cand = Path(yml_dir) / f"{stem}.yml"
+        many = yml_dir if isinstance(yml_dir, (list, tuple)) else [yml_dir]
+        cand = next((c for c in (Path(d) / f"{stem}.yml" for d in many) if c.exists()),
+                    Path(many[0]) / f"{stem}.yml")
         if cand.exists():
             try:
-                with open(cand, "r") as f:
+                with open(cand, "r", encoding="utf-8") as f:
                     y = yaml.safe_load(f) or {}
                 for k in ("fps", "frame_rate", "frameRate"):
                     if k in y:
@@ -440,7 +444,7 @@ def _extract_meta_fields(meta_row: dict, column_map: dict) -> tuple[str, str, st
 
 
 def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
-                      pose_slp_suffix: str, column_map: dict):
+                      pose_slp_suffix: str, column_map: dict, pose_dir=None):
     """Process a single video: load SLEAP, detect strides, compute metrics.
 
     Returns (stride_rows, step_rows, per_video_row) or None if skipped.
@@ -451,7 +455,9 @@ def process_one_video(meta_row: dict, params: dict, yml_dir: str | Path,
     if not video_path.exists():
         return None
 
-    pose_path = video_path.with_suffix(pose_slp_suffix)
+    # next to the video (as always); `pose_dir` is only looked at when no file is there
+    from stride.utils.pose_io import resolve_pose_path
+    pose_path = resolve_pose_path(video_path, pose_slp_suffix, pose_dir)
     if not pose_path.exists():
         return None
 
@@ -735,24 +741,31 @@ KEYPOINT_NAMES = [
 
 
 def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
-                                output_path: Path) -> Path:
+                                output_path: Path, *, videos: list | None = None,
+                                pose_dir=None) -> Path:
     """Compute per-video mean keypoint confidence from .slp files.
 
     Iterates over all videos, loads the paired .slp file, extracts confidence
     scores, and writes a CSV with one row per video.
+
+    ``videos`` (optional) gives the list explicitly instead of searching ``video_dir``;
+    ``pose_dir`` (optional) is searched when no pose file sits next to a video.
     """
     import sleap_io as sio
 
-    video_dir = Path(video_dir)
     rows = []
 
-    # recursive + case-insensitive: supports flat dirs AND nested per-day subdirs
-    videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
+    if videos is None:
+        video_dir = Path(video_dir)
+        # recursive + case-insensitive: supports flat dirs AND nested per-day subdirs
+        videos = sorted({v for ext in ("mp4", "MP4") for v in video_dir.rglob(f"*.{ext}")})
+    else:
+        videos = [Path(v) for v in videos]
     n_no_pose = 0
     unreadable = []
-    from stride.utils.pose_io import load_pose_labels
+    from stride.utils.pose_io import load_pose_labels, resolve_pose_path
     for vp in videos:
-        pose_path = vp.with_suffix(pose_slp_suffix)
+        pose_path = resolve_pose_path(vp, pose_slp_suffix, pose_dir)
         if not pose_path.exists():
             n_no_pose += 1
             continue
@@ -818,9 +831,10 @@ def compute_keypoint_confidence(video_dir: Path, pose_slp_suffix: str,
 
 def _process_wrapper(args):
     """Wrapper for ProcessPoolExecutor (must be top-level for pickling)."""
-    meta_row, params, yml_dir, pose_slp_suffix, column_map = args
+    meta_row, params, yml_dir, pose_slp_suffix, column_map = args[:5]
+    pose_dir = args[5] if len(args) > 5 else None
     try:
-        res = process_one_video(meta_row, params, yml_dir, pose_slp_suffix, column_map)
+        res = process_one_video(meta_row, params, yml_dir, pose_slp_suffix, column_map, pose_dir)
         out = {"status": "ok" if res else "skip", "result": res,
                "video": meta_row.get("video_path", "?")}
     except Exception as e:
@@ -850,6 +864,9 @@ def run_gait_extraction(
     pose_slp_suffix: str = ".slp",
     column_map: dict | None = None,
     n_workers: int = 16,
+    *,
+    meta_rows: list | None = None,
+    pose_dir=None,
 ) -> dict:
     """Run Stages 4-5: keypoint preprocessing + stride detection.
 
@@ -861,6 +878,10 @@ def run_gait_extraction(
         pose_slp_suffix: File suffix for SLEAP pose files (e.g., ".slp" or ".pose.v2.slp")
         column_map: Maps batch-specific columns to canonical names
         n_workers: Number of parallel workers
+        meta_rows: Optional rows to use instead of reading ``meta_csv`` (list of dicts with the
+            same columns; used by `stride tmaze`, which builds the list itself)
+        pose_dir: Optional folder searched for ``<video stem><pose suffix>`` when no pose file
+            sits next to the video
 
     Returns:
         Summary dict with counts
@@ -875,11 +896,12 @@ def run_gait_extraction(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save params
-    with open(output_dir / "run_params.json", "w") as f:
+    with open(output_dir / "run_params.json", "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2)
 
-    meta = pd.read_csv(meta_csv)
-    meta_rows = [row.to_dict() for _, row in meta.iterrows()]
+    if meta_rows is None:
+        meta = pd.read_csv(meta_csv)
+        meta_rows = [row.to_dict() for _, row in meta.iterrows()]
 
     print(f"  Processing {len(meta_rows)} videos with {n_workers} workers...")
 
@@ -893,7 +915,9 @@ def run_gait_extraction(
 
     # Build args for each video
     args_list = [
-        (row, params, str(yml_dir), pose_slp_suffix, column_map)
+        (row, params,
+         [str(d) for d in yml_dir] if isinstance(yml_dir, (list, tuple)) else str(yml_dir),
+         pose_slp_suffix, column_map, pose_dir)
         for row in meta_rows
     ]
 

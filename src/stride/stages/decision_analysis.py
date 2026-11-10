@@ -29,6 +29,7 @@ from shapely.ops import unary_union
 from stride.config import PipelineConfig
 from stride.utils.video import read_fps
 from stride.utils.parallel import run_parallel
+from stride.utils.pose_io import resolve_pose_path
 
 # Default thresholds
 MIN_DEPTH_PX = 50  # Minimum depth from junction to qualify as "deep entry"
@@ -52,6 +53,9 @@ def run_decision_analysis(
     min_depth_px: int = MIN_DEPTH_PX,
     config: Optional[PipelineConfig] = None,
     pose_slp_suffix: str = ".slp",
+    *,
+    trials: Optional[list] = None,
+    pose_dir: Optional[Path] = None,
 ) -> dict:
     """
     Run T-maze decision analysis on all videos.
@@ -71,6 +75,14 @@ def run_decision_analysis(
         config: Optional pipeline config for thresholds
         pose_slp_suffix: Suffix of the pose file next to each video (default ".slp";
             e.g. ".pose.v2.slp")
+        trials: Optional explicit trial list (used by `stride tmaze`). Each item is a dict with
+            ``video_path`` and optionally ``day``, ``mouse``, ``trial``, ``reward``. When given,
+            the videos are exactly these (any file name; ``video_dir`` is only reported and
+            ``meta_csv`` is not read), and a trial without an L/R reward gets EMPTY correctness
+            columns instead of "not correct". Without it nothing changes: videos are named
+            ``Day<N>_<mouse>_Trial<T>`` and the reward comes from ``meta_csv``.
+        pose_dir: Optional folder searched for ``<video stem><pose suffix>`` when no pose file
+            sits next to the video.
 
     Returns:
         Summary dict with counts
@@ -80,6 +92,11 @@ def run_decision_analysis(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if trials is not None:
+        return _run_decision_analysis_trials(
+            trials, video_dir, yml_dir, output_dir, n_workers, min_depth_px, config,
+            pose_slp_suffix, pose_dir)
 
     # Load metadata
     meta_df = pd.read_csv(meta_csv)
@@ -100,6 +117,7 @@ def run_decision_analysis(
         min_depth_px=min_depth_px,
         config=config,
         pose_slp_suffix=pose_slp_suffix,
+        pose_dir=pose_dir,
     )
 
     # Metadata matching report (warnings only: scoring is unchanged)
@@ -209,6 +227,94 @@ def run_decision_analysis(
     return summary
 
 
+def _run_decision_analysis_trials(trials: list, video_dir, yml_dir, output_dir: Path, n_workers: int,
+                                  min_depth_px: int, config: PipelineConfig, pose_slp_suffix: str,
+                                  pose_dir: Optional[Path]) -> dict:
+    """Explicit-trial-list mode: same analysis and same CSV columns as the default mode."""
+    worker_fn = partial(process_trial, yml_dir=yml_dir, min_depth_px=min_depth_px, config=config,
+                        pose_slp_suffix=pose_slp_suffix, pose_dir=pose_dir)
+    if n_workers > 1 and len(trials) > 1:
+        print(f"Running decision analysis with {n_workers} parallel workers...")
+        results = run_parallel(items=trials, worker_fn=worker_fn, n_workers=n_workers,
+                               desc="Decision Analysis")
+    else:
+        results = []
+        for i, t in enumerate(trials, 1):
+            result = worker_fn(t)
+            results.append(result)
+            print(f"[{i}/{len(trials)}] {result.get('status', 'ok'):10} {Path(t['video_path']).name}")
+
+    events_rows = [r["events"] for r in results if r["status"] == "ok"]
+    decisions_rows = [r["decisions"] for r in results if r["status"] == "ok"]
+
+    def _frame(rows, cols):
+        df = pd.DataFrame(rows).reindex(columns=cols)
+        df["day"] = df["day"].fillna("").astype(str)
+        df["mouse"] = df["mouse"].fillna("").astype(str)
+        df["trial"] = pd.to_numeric(df["trial"], errors="coerce").astype("Int64")
+        return df.sort_values(["day", "mouse", "trial", "stem"], kind="mergesort",
+                              na_position="last").reset_index(drop=True)
+
+    events_df = decisions_df = None
+    if events_rows:
+        events_df = _frame(events_rows, EVENTS_COLUMNS)
+        events_df.to_csv(output_dir / "events.csv", index=False)
+    if decisions_rows:
+        decisions_df = _frame(decisions_rows, DECISIONS_COLUMNS)
+        if decisions_df["correct_bin"].isna().any():
+            decisions_df["correct_bin"] = decisions_df["correct_bin"].astype("Int64")
+        decisions_df.to_csv(output_dir / "decisions.csv", index=False)
+    if events_df is not None and decisions_df is not None:
+        build_metrics(events_df, decisions_df).to_csv(output_dir / "metrics.csv", index=False)
+
+    summary = {"total": len(trials), "ok": len(events_rows), "skipped": len(trials) - len(events_rows)}
+    skip_reasons, error_examples = _summarize_skips(results)
+    _print_stage_summary(video_dir, summary, skip_reasons, error_examples, pose_slp_suffix)
+    n_no_entry = sum(1 for d in decisions_rows if not d.get("ok", True))
+    if n_no_entry:
+        summary["no_arm_entry"] = n_no_entry
+    n_unknown = sum(1 for d in decisions_rows if d.get("correct_TF", "") == "")
+    summary["reward_unknown"] = n_unknown
+    if skip_reasons:
+        summary["skip_reasons"] = skip_reasons
+        summary["skipped_videos"] = {str(r.get("video")): str(r.get("status")) for r in results
+                                     if r.get("status") != "ok"}
+    if error_examples:
+        summary["errors"] = error_examples
+    try:
+        from stride.run_manifest import write_run_manifest
+        write_run_manifest(
+            output_dir, "decisions",
+            params={"n_workers": n_workers, "min_depth_px": min_depth_px,
+                    "pose_slp_suffix": pose_slp_suffix, "mode": "explicit trial list"},
+            inputs={"video_dir": video_dir, "yml_dir": yml_dir, "pose_dir": pose_dir,
+                    "n_videos": len(trials)},
+            outputs=[output_dir / "decisions.csv", output_dir / "events.csv",
+                     output_dir / "metrics.csv"],
+            results=summary,
+        )
+    except Exception:
+        pass
+    return summary
+
+
+EVENTS_COLUMNS = [
+    "day", "mouse", "trial", "stem", "video_path",
+    "enter_seg1_frame", "enter_seg4_frame", "enter_junction_frame",
+    "commit_side", "commit_frame", "ok",
+    "enter_seg1_ms", "enter_seg4_ms", "enter_junction_ms", "commit_ms",
+    "junction_explore_frames_precommit", "junction_explore_ms_precommit",
+    "probes_L", "probes_R", "probe_frames_L", "probe_frames_R",
+    "n_reversals", "reversal_frames", "reversal_ms",
+    "coverage_thr_rule"
+]
+DECISIONS_COLUMNS = [
+    "video_path", "stem", "day", "mouse", "trial", "reward", "fps",
+    "ok", "reason", "gate_frame", "gate_reason",
+    "entry_side", "entry_frame", "entry_ms", "entry_threshold",
+    "correct_TF", "correct_bin"
+]
+
 _SKIP_LABELS = {
     "skip_parse": "file name is not Day<N>_<mouse>_Trial<T>.mp4",
     "skip_pose": "no pose file next to the video",
@@ -291,6 +397,7 @@ def process_single_video(
     min_depth_px: int,
     config: PipelineConfig,
     pose_slp_suffix: str = ".slp",
+    pose_dir: Optional[Path] = None,
 ) -> dict:
     """Process a single video for decision analysis with depth-based commit."""
     # Parse filename
@@ -298,16 +405,33 @@ def process_single_video(
     if key is None:
         return {"status": "skip_parse", "video": video_path.name}
 
+    reward = meta_map.get((key["day"], key["mouse"]), "")
+    return _analyse_trial(video_path, key, reward, yml_dir, min_depth_px, config,
+                          pose_slp_suffix, pose_dir, blank_unknown_reward=False)
+
+
+def process_trial(trial: dict, yml_dir, min_depth_px: int, config: PipelineConfig,
+                  pose_slp_suffix: str = ".slp", pose_dir: Optional[Path] = None) -> dict:
+    """Worker of the explicit-trial-list mode (`stride tmaze`): any file name, reward optional."""
+    video_path = Path(trial["video_path"])
+    key = {"day": trial.get("day") or "", "mouse": trial.get("mouse") or "",
+           "trial": trial.get("trial")}
+    return _analyse_trial(video_path, key, trial.get("reward") or "", yml_dir, min_depth_px,
+                          config, pose_slp_suffix, pose_dir, blank_unknown_reward=True)
+
+
+def _analyse_trial(video_path: Path, key: dict, reward: str, yml_dir, min_depth_px: int,
+                   config: PipelineConfig, pose_slp_suffix: str, pose_dir: Optional[Path],
+                   blank_unknown_reward: bool) -> dict:
+    """Decision analysis of one video whose day / mouse / trial / reward are already known."""
     # Check for required files
-    pose_path = video_path.with_suffix(pose_slp_suffix)
+    pose_path = resolve_pose_path(video_path, pose_slp_suffix, pose_dir)
     yml_path = resolve_roi_yml(video_path, yml_dir)
 
     if not pose_path.exists():
         return {"status": "skip_pose", "video": video_path.name}
     if yml_path is None:
         return {"status": "skip_yml", "video": video_path.name}
-
-    reward = meta_map.get((key["day"], key["mouse"]), "")
 
     try:
         # Load data with labels and tracks for depth calculation
@@ -320,6 +444,10 @@ def process_single_video(
             pct_cover, fps, reward, roi_polys, labels, trx,
             min_depth_px=min_depth_px, config=config
         )
+        if blank_unknown_reward and str(reward).strip().upper()[:1] not in ("L", "R"):
+            # reward unknown: the choice is reported, whether it was correct is left empty
+            decision["correct_TF"] = ""
+            decision["correct_bin"] = None
 
         # Compute dwell intervals for junction exploration counting
         dwell_df = find_dwell_intervals(
@@ -752,7 +880,9 @@ def resolve_roi_yml(video_path: Path, yml_dir: Optional[Path]) -> Optional[Path]
     names = [f"{stem}.preds.v2.best1.yml", f"{stem}.rois.yml", f"{stem}.yml"]
     search_dirs = []
     if yml_dir is not None:
-        search_dirs.append(Path(yml_dir))
+        # one folder, or several (searched in the order given)
+        many = yml_dir if isinstance(yml_dir, (list, tuple)) else [yml_dir]
+        search_dirs.extend(Path(d) for d in many)
     search_dirs.append(video_path.parent)  # co-located fallback
     for d in search_dirs:
         for n in names:
@@ -764,7 +894,7 @@ def resolve_roi_yml(video_path: Path, yml_dir: Optional[Path]) -> Optional[Path]
 
 def load_rois(yml_path: Path) -> dict[str, Polygon]:
     """Load ROI polygons from YAML file."""
-    with open(yml_path) as f:
+    with open(yml_path, encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
 
     name_map = {

@@ -78,10 +78,14 @@ def slp_to_roi_yaml(slp_path: str, yaml_path: str) -> None:
     """
     import sleap_io as sio
 
-    labels = sio.load_file(slp_path)
+    try:
+        labels = sio.load_file(slp_path)
+    except OSError:  # the embedded video path is unreadable on this machine: the points suffice
+        labels = sio.load_slp(str(slp_path), open_videos=False)
 
-    # Validate keypoints
-    valid, msg = validate_23_keypoints(labels)
+    # Validate keypoints: the 16 corners are required; the 7 region centroids are not used by
+    # the polygon builder (same rule as the frame selector, stride.stages.roi_selection).
+    valid, msg = validate_corner_keypoints(labels)
     if not valid:
         raise ValueError(f"Missing required keypoints: {msg}")
 
@@ -90,11 +94,15 @@ def slp_to_roi_yaml(slp_path: str, yaml_path: str) -> None:
 
     # Get frame dimensions
     video = labels.videos[0] if getattr(labels, "videos", None) else None
-    if video and hasattr(video, "shape") and len(video.shape) >= 3:
-        if len(video.shape) == 4:
-            _, H, W, _ = video.shape
+    try:
+        shape = getattr(video, "shape", None) if video else None
+    except Exception:
+        shape = None
+    if shape is not None and len(shape) >= 3 and all(v is not None for v in shape[-3:-1]):
+        if len(shape) == 4:
+            _, H, W, _ = shape
         else:
-            H, W, _ = video.shape
+            H, W, _ = shape
     else:
         H, W = 4096, 4096
 
@@ -201,7 +209,7 @@ def slp_to_roi_yaml(slp_path: str, yaml_path: str) -> None:
         },
     }
 
-    with open(yaml_path, "w") as f:
+    with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False)
 
 
@@ -250,8 +258,18 @@ def _get_point_xy(instance, idx):
     return None
 
 
+def validate_corner_keypoints(labels) -> tuple[bool, str]:
+    """Check that all 16 maze corners are present and finite (centroids are optional)."""
+    from stride.stages.roi_selection import REQUIRED_CORNERS_16
+    return _validate_keypoints(labels, REQUIRED_CORNERS_16)
+
+
 def validate_23_keypoints(labels) -> tuple[bool, str]:
-    """Check if all 23 required keypoints are present and finite."""
+    """Check if all 23 keypoints (16 corners + 7 centroids) are present and finite."""
+    return _validate_keypoints(labels, STRICT_REQUIRED_23)
+
+
+def _validate_keypoints(labels, required) -> tuple[bool, str]:
     if len(labels) < 1 or not labels[0].instances:
         return False, "No instances in SLP"
 
@@ -262,7 +280,7 @@ def validate_23_keypoints(labels) -> tuple[bool, str]:
     norm = {_norm(name): i for i, name in enumerate(skel_names)}
 
     missing = []
-    for name in STRICT_REQUIRED_23:
+    for name in required:
         pt = _xy_by_name(inst, exact, norm, name)
         if pt is None:
             missing.append(name)
