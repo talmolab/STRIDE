@@ -39,3 +39,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# `pytest` runs the public tests; the lab tests are collected too once the lab layer is installed (pip install -e lab/)
+testpaths = ["tests", "lab/tests"]
