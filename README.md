@@ -18,10 +18,14 @@ built for, and its results, are described in the paper and on the
 |---|---|---|---|---|
 | **STRIDE T-maze** | T-maze recordings, with your own trained pose and maze-ROI models | videos, two model paths | per-trial and per-stride CSV tables, a summary, run logs | `stride tmaze` |
 | **STRIDE Gait** | any recording with pose tracking, no maze needed | videos + pose files (or a pose model), and the scale (px/cm) | per-stride, per-step and per-video gait tables | `stride gait` |
-| **STRIDE Lab** | the authors' own intake workflow (not needed to use STRIDE) | raw camera clips + recorder metadata | renamed clips, a per-day scale check, then STRIDE T-maze | `stride-lab`, see [docs/lab-workflow.md](docs/lab-workflow.md) |
 
 Pages: [STRIDE T-maze](docs/tmaze.md) · [STRIDE Gait](docs/gait.md) ·
 [Scale calibration](docs/CALIBRATION.md) · [docs index](docs/README.md)
+
+The repository also holds `lab/`, the intake workflow the authors use for their own recordings
+(sorting and renaming camera clips against the recording metadata, a per-day scale check, then
+STRIDE T-maze). It is kept here for transparency and is not needed to use STRIDE; see
+[docs/lab-workflow.md](docs/lab-workflow.md).
 
 ## Install
 
